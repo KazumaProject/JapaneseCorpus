@@ -48,6 +48,18 @@ redistributed, apart from the matching context-ID definition and required notice
 Vibrato and IPADIC are used for morphological analysis and readings. The Release
 includes `IPADIC-COPYING` and `IPADIC-NOTICE` alongside the generated dictionaries.
 
+## JMdict Japanese-English dictionary
+
+- Project: Electronic Dictionary Research and Development Group JMdict/EDICT
+- Source: <https://www.edrdg.org/pub/Nihongo/JMdict_e.gz>
+- Documentation: <https://www.edrdg.org/wiki/JMdict-EDICT_Dictionary_Project.html>
+- Licence: CC BY-SA 4.0 and the attribution conditions published by EDRDG
+
+The hiragana-to-English dictionary extracts English glosses and complete
+English language-source forms from katakana-reading JMdict entries. Each
+Release includes the exact source snapshot, its SHA-256 in the English
+dictionary manifest, and a saved copy of the EDRDG licence page.
+
 ## Pipeline code
 
 The source code and configuration in this repository are licensed under the

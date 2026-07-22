@@ -7,4 +7,6 @@ dist/
 work/
 *.egg-info/
 ngram-builder/target/
+conversion-engine/target/
+jmdict-builder/target/
 .DS_Store

@@ -153,6 +153,51 @@ class ManifestTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            english_asset = b"compressed English dictionary"
+            english_digest = hashlib.sha256(english_asset).hexdigest()
+            english_manifest_path = directory / "english-dictionary-manifest.json"
+            write_json(
+                english_manifest_path,
+                {
+                    "schema_version": 1,
+                    "format": {},
+                    "source": {
+                        "name": "JMdict_e",
+                        "url": "https://example.test/JMdict_e.gz",
+                        "created": "2026-07-22",
+                        "etag": '"abc"',
+                        "last_modified": "Wed, 22 Jul 2026 03:30:21 GMT",
+                        "bytes": 100,
+                        "sha256": "e" * 64,
+                        "license": "CC-BY-SA-4.0",
+                    },
+                    "parameters": {},
+                    "counts": {
+                        "jmdict_entries": 10,
+                        "katakana_entries": 4,
+                        "unique_readings": 5,
+                        "retained_entries": 9,
+                    },
+                    "build": {},
+                    "assets": [
+                        {
+                            "name": "mozc-english-unigram-00000.txt.zst",
+                            "bytes": len(english_asset),
+                            "sha256": english_digest,
+                        }
+                    ],
+                },
+            )
+            english_manifest_digest = hashlib.sha256(
+                english_manifest_path.read_bytes()
+            ).hexdigest()
+            english_sums_path = directory / "ENGLISH-DICTIONARY-SHA256SUMS"
+            english_sums_path.write_text(
+                f"{english_digest}  mozc-english-unigram-00000.txt.zst\n"
+                f"{english_manifest_digest}  english-dictionary-manifest.json\n",
+                encoding="utf-8",
+            )
+
             manifest = build_manifest(
                 stats_directory,
                 discovery,
@@ -163,6 +208,8 @@ class ManifestTest(unittest.TestCase):
                 "2026-07-22T00:00:00Z",
                 dictionary_manifest_path,
                 dictionary_sums_path,
+                english_manifest_path,
+                english_sums_path,
             )
 
             self.assertEqual(manifest["totals"]["dictionary_entries"], 15)
@@ -173,6 +220,16 @@ class ManifestTest(unittest.TestCase):
             checksums = (directory / "SHA256SUMS").read_text(encoding="utf-8")
             self.assertIn("mozc-unigram-00000.txt.zst", checksums)
             self.assertIn("NGRAM-SHA256SUMS", checksums)
+            self.assertEqual(manifest["totals"]["english_dictionary_entries"], 9)
+            self.assertEqual(
+                manifest["english_dictionary"]["metadata_assets"],
+                [
+                    "english-dictionary-manifest.json",
+                    "ENGLISH-DICTIONARY-SHA256SUMS",
+                ],
+            )
+            self.assertEqual(manifest["sources"]["jmdict"]["created"], "2026-07-22")
+            self.assertIn("mozc-english-unigram-00000.txt.zst", checksums)
 
 
 if __name__ == "__main__":

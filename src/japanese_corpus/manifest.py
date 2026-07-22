@@ -39,6 +39,8 @@ def build_manifest(
     built_at: str | None = None,
     dictionary_manifest_path: Path | None = None,
     dictionary_checksums_path: Path | None = None,
+    english_dictionary_manifest_path: Path | None = None,
+    english_dictionary_checksums_path: Path | None = None,
 ) -> dict[str, Any]:
     stats = load_stats(stats_directory)
     with discovery_path.open(encoding="utf-8") as stream:
@@ -83,6 +85,26 @@ def build_manifest(
             dictionary_manifest_path, dictionary_checksums_path
         )
 
+    english_dictionary = None
+    english_checksum_entries: list[tuple[str, str]] = []
+    if (
+        english_dictionary_manifest_path is not None
+        or english_dictionary_checksums_path is not None
+    ):
+        if (
+            english_dictionary_manifest_path is None
+            or english_dictionary_checksums_path is None
+        ):
+            raise RuntimeError(
+                "English dictionary manifest and checksum paths must be provided together"
+            )
+        english_dictionary, english_checksum_entries = (
+            load_english_dictionary_metadata(
+                english_dictionary_manifest_path,
+                english_dictionary_checksums_path,
+            )
+        )
+
     manifest = {
         "schema_version": 1,
         "release": {
@@ -103,6 +125,16 @@ def build_manifest(
                 "metadata_sha256": aozora_stats.get("metadata_sha256", ""),
                 "license": "Public-Domain-only selection",
             },
+            **(
+                {
+                    "jmdict": {
+                        **english_dictionary["source"],
+                        "license": "CC-BY-SA-4.0",
+                    }
+                }
+                if english_dictionary is not None
+                else {}
+            ),
         },
         "assets": assets,
         "totals": {
@@ -124,14 +156,37 @@ def build_manifest(
                 if dictionaries is not None
                 else {}
             ),
+            **(
+                {
+                    "english_dictionary_assets": len(
+                        english_dictionary["assets"]
+                    ),
+                    "english_dictionary_entries": int(
+                        english_dictionary["counts"]["retained_entries"]
+                    ),
+                    "english_dictionary_bytes": sum(
+                        int(item["bytes"])
+                        for item in english_dictionary["assets"]
+                    ),
+                }
+                if english_dictionary is not None
+                else {}
+            ),
         },
         **({"dictionaries": dictionaries} if dictionaries is not None else {}),
+        **(
+            {"english_dictionary": english_dictionary}
+            if english_dictionary is not None
+            else {}
+        ),
     }
     write_json(output_path, manifest)
     with checksums_path.open("w", encoding="utf-8", newline="\n") as stream:
         for item in assets:
             stream.write(f"{item['sha256']}  {item['name']}\n")
         for digest, name in dictionary_checksum_entries:
+            stream.write(f"{digest}  {name}\n")
+        for digest, name in english_checksum_entries:
             stream.write(f"{digest}  {name}\n")
     return manifest
 
@@ -207,6 +262,78 @@ def load_dictionary_metadata(
         ]
     )
     dictionary["metadata_assets"] = [manifest_name, "NGRAM-SHA256SUMS"]
+    return dictionary, entries
+
+
+def load_english_dictionary_metadata(
+    manifest_path: Path, checksums_path: Path
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    manifest_name = "english-dictionary-manifest.json"
+    checksums_name = "ENGLISH-DICTIONARY-SHA256SUMS"
+    with manifest_path.open(encoding="utf-8") as stream:
+        dictionary = json.load(stream)
+    required = {
+        "schema_version",
+        "format",
+        "source",
+        "parameters",
+        "counts",
+        "build",
+        "assets",
+    }
+    missing = required - dictionary.keys()
+    if missing:
+        raise RuntimeError(
+            f"English dictionary manifest is missing fields: {sorted(missing)}"
+        )
+    if dictionary["schema_version"] != 1:
+        raise RuntimeError("Unsupported English dictionary manifest schema")
+
+    sums: dict[str, str] = {}
+    with checksums_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            line = line.rstrip("\n")
+            try:
+                digest, name = line.split("  ", 1)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"Malformed English dictionary checksum line {line_number}"
+                ) from error
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise RuntimeError(
+                    f"Invalid SHA-256 on English dictionary checksum line {line_number}"
+                )
+            sums[name] = digest
+
+    entries: list[tuple[str, str]] = []
+    for asset in dictionary["assets"]:
+        required_asset = {"name", "bytes", "sha256"}
+        missing_asset = required_asset - asset.keys()
+        if missing_asset:
+            raise RuntimeError(
+                "English dictionary asset is missing fields: "
+                f"{sorted(missing_asset)}"
+            )
+        if int(asset["bytes"]) >= MAX_RELEASE_ASSET_BYTES:
+            raise RuntimeError(f"{asset['name']} exceeds GitHub's 2 GiB asset limit")
+        if sums.get(asset["name"]) != asset["sha256"]:
+            raise RuntimeError(
+                f"Checksum mismatch for English dictionary asset {asset['name']}"
+            )
+        entries.append((asset["sha256"], asset["name"]))
+
+    manifest_digest = _sha256(manifest_path)
+    if sums.get(manifest_name) != manifest_digest:
+        raise RuntimeError("English dictionary manifest checksum mismatch")
+    entries.extend(
+        [
+            (manifest_digest, manifest_name),
+            (_sha256(checksums_path), checksums_name),
+        ]
+    )
+    dictionary["metadata_assets"] = [manifest_name, checksums_name]
     return dictionary, entries
 
 

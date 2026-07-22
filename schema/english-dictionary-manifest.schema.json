@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/english-dictionary-manifest.schema.json",
+  "title": "JapaneseCorpus hiragana-to-English dictionary manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "format",
+    "source",
+    "parameters",
+    "counts",
+    "build",
+    "assets"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "format": {
+      "type": "object",
+      "required": [
+        "name",
+        "columns",
+        "encoding",
+        "compression",
+        "reading_normalization"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "name",
+        "url",
+        "created",
+        "bytes",
+        "sha256",
+        "license"
+      ]
+    },
+    "parameters": {
+      "type": "object",
+      "required": [
+        "reading_selection",
+        "translation_language",
+        "include_full_english_lsource",
+        "excluded_gloss_types",
+        "base_cost",
+        "entries_per_shard"
+      ]
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "jmdict_entries",
+        "katakana_entries",
+        "unique_readings",
+        "retained_entries"
+      ]
+    },
+    "build": {
+      "type": "object",
+      "required": ["pipeline_commit"]
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "bytes", "sha256"]
+      }
+    }
+  },
+  "additionalProperties": true
+}

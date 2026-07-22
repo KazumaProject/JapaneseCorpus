@@ -28,12 +28,21 @@ jobs:
           python -m json.tool schema/corpus-record.schema.json >/dev/null
           python -m json.tool schema/release-manifest.schema.json >/dev/null
           python -m json.tool schema/ngram-manifest.schema.json >/dev/null
+          python -m json.tool schema/english-dictionary-manifest.schema.json >/dev/null
           PYTHONPATH=src python -m japanese_corpus --help >/dev/null
       - name: Test n-gram dictionary builder
         run: |
           rustup component add rustfmt
           cargo fmt --manifest-path ngram-builder/Cargo.toml -- --check
           cargo test --locked --manifest-path ngram-builder/Cargo.toml
+      - name: Test kana-kanji conversion engine
+        run: |
+          cargo fmt --manifest-path conversion-engine/Cargo.toml -- --check
+          cargo test --locked --manifest-path conversion-engine/Cargo.toml
+      - name: Test JMdict English dictionary builder
+        run: |
+          cargo fmt --manifest-path jmdict-builder/Cargo.toml -- --check
+          cargo test --locked --manifest-path jmdict-builder/Cargo.toml
       - name: Run n-gram integration test
         run: |
           set -euo pipefail
@@ -80,3 +89,31 @@ jobs:
           done
           jq -e '.orders | length == 3 and all(.retained_entries > 0)' \
             "$INTEGRATION/output/ngram-manifest.json" >/dev/null
+          CONVERTED=$(cargo run --quiet --locked \
+            --manifest-path conversion-engine/Cargo.toml -- \
+            --dictionary "$INTEGRATION/output" \
+            わたしはがっこうへいく)
+          grep -q '私' <<<"$CONVERTED"
+
+          mkdir -p "$INTEGRATION/english-output"
+          gzip -c jmdict-builder/tests/fixtures/JMdict_e.xml \
+            > "$INTEGRATION/JMdict_e.xml.gz"
+          cargo run --quiet --locked \
+            --manifest-path jmdict-builder/Cargo.toml -- build \
+            --input "$INTEGRATION/JMdict_e.xml.gz" \
+            --mozc-id-def "$INTEGRATION/mozc-id.def" \
+            --jmdict-license jmdict-builder/tests/fixtures/JMDICT-LICENSE.html \
+            --output-dir "$INTEGRATION/english-output" \
+            --source-url https://example.test/JMdict_e.gz \
+            --source-etag fixture \
+            --source-last-modified 2026-07-22 \
+            --pipeline-commit "$GITHUB_SHA"
+          (cd "$INTEGRATION/english-output" && sha256sum --check ENGLISH-DICTIONARY-SHA256SUMS)
+          jq -e '.counts.retained_entries == 9' \
+            "$INTEGRATION/english-output/english-dictionary-manifest.json" >/dev/null
+          ENGLISH_CONVERTED=$(cargo run --quiet --locked \
+            --manifest-path conversion-engine/Cargo.toml -- \
+            --dictionary "$INTEGRATION/english-output" \
+            --candidates 5 \
+            こんぴゅーた)
+          grep -q $'\tcomputer$' <<<"$ENGLISH_CONVERTED"

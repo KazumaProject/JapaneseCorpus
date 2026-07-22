@@ -21,3 +21,10 @@ The generated Mozc-format n-gram dictionaries are derived from the same corpus
 and are distributed under CC BY-SA 4.0. The bundled Mozc context-ID definition
 and third-party notice files retain their respective upstream terms; see the
 Release assets `MOZC-LICENSE`, `IPADIC-COPYING`, and `IPADIC-NOTICE`.
+
+The hiragana-to-English dictionary is derived from the Electronic Dictionary
+Research and Development Group's JMdict file and is distributed under the
+same CC BY-SA 4.0 terms. The exact source snapshot and the EDRDG licence page
+are included in each Release as `JMdict_e-<date>.xml.gz` and
+`JMDICT-LICENSE.html`. This project does not claim copyright over JMdict
+material.

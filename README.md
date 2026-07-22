@@ -23,6 +23,9 @@
 - `mozc-trigram-<part>.txt.zst`: 隣接3語を句として格納したMozc 5列辞書
 - `mozc-id.def`: 辞書の左右文脈IDに対応するMozc定義
 - `ngram-manifest.json` / `NGRAM-SHA256SUMS`: 辞書の件数、生成条件、検証値
+- `mozc-english-unigram-<part>.txt.zst`: ひらがな読みから英語候補への辞書
+- `english-dictionary-manifest.json` / `ENGLISH-DICTIONARY-SHA256SUMS`: 日英辞書の出典、件数、検証値
+- `JMdict_e-<date>.xml.gz` / `JMDICT-LICENSE.html`: 使用したJMdict原本とライセンス
 
 展開例:
 
@@ -60,6 +63,7 @@ zstd -dc wikipedia-20260719-00000.jsonl.zst | head -n 1 | jq
 - 青空文庫: 公式拡充版CSVで作品・全関係人物の著作権フラグが `なし` の作品だけを取得
 - 共通正規化: UTF-8、LF、Unicode NFC、制御文字・行末空白・過剰空行の除去
 - 形態素解析、文分割、表記の現代化、他ソース間の重複除去は行わない
+- 日英辞書: 英語版JMdictのカタカナ読みをひらがなへ正規化し、英語訳を候補化
 
 青空文庫の旧字旧仮名作品も、`metadata.orthography` で判別できる形で保持します。
 かな漢字変換モデルを作る段階で用途に合わせて選別してください。
@@ -84,6 +88,20 @@ bigram/trigramの候補抽出後に全コーパスを再走査するため、収
 4列のMozcユーザー辞書エクスポートではなく、Mozc本体をビルドするときに使う
 システム辞書ソースです。必ず同梱の`mozc-id.def`と組み合わせてください。
 
+## Hiragana-to-English dictionary
+
+EDRDGが日次配布する英語版JMdictから、カタカナだけで構成される読みと英語訳を
+抽出します。読みはNFKC相当の互換分解・再合成後にひらがなへ変換し、JMdictの
+読み制限、語彙優先度、語義順をMozcコストへ反映します。
+
+```text
+あーと<TAB>left_id<TAB>right_id<TAB>cost<TAB>art
+こんぴゅーた<TAB>left_id<TAB>right_id<TAB>cost<TAB>computer
+```
+
+同じ読みの複数候補を残すため、一般語の`art`と略語の`ART`は別行です。
+入力に使ったJMdict原本、SHA-256、ETag、生成日、ライセンスをReleaseへ同梱します。
+
 ## Development
 
 Python 3.11以上、Git、`zstd` が必要です。ランタイムのPython外部依存は
@@ -93,7 +111,29 @@ Python 3.11以上、Git、`zstd` が必要です。ランタイムのPython外�
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m japanese_corpus discover --output work/discovery.json
 cargo test --locked --manifest-path ngram-builder/Cargo.toml
+cargo test --locked --manifest-path conversion-engine/Cargo.toml
+cargo test --locked --manifest-path jmdict-builder/Cargo.toml
 ```
+
+## Kana-kanji conversion
+
+生成したunigram／bigram／trigram辞書を直接読み込む、独立したかな漢字変換エンジンを
+`conversion-engine`に収録しています。入力読みのラティスを作り、辞書コストに基づく
+ビーム探索で文脈を含む句候補を選択します。Mozc本体のビルドは不要です。
+
+```console
+cargo build --release --locked --manifest-path conversion-engine/Cargo.toml
+conversion-engine/target/release/kana-kanji-converter \
+  --dictionary path/to/extracted-dictionary \
+  -n 10 こんぴゅーた
+```
+
+出力ディレクトリに`mozc-english-unigram-*`があれば、`computer`などの英語候補も
+日本語候補と一緒に返ります。`-n 5`で複数候補、`--details`で採用した
+1/2/3-gramの分割とコストを確認できます。
+引数の読みを省略すると標準入力を1行ずつ変換するため、辞書を一度だけロードして
+継続利用できます。詳しくは[`conversion-engine/README.md`](conversion-engine/README.md)
+を参照してください。
 
 個別のWikipediaシャード生成:
 
@@ -115,4 +155,5 @@ draft Releaseを検証してから公開します。
 
 - パイプラインコード: [MIT License](LICENSE)
 - 生成コーパス: [CC BY-SA 4.0](LICENSE-DATA.md)
+- 生成日英辞書と同梱JMdict: EDRDGのCC BY-SA 4.0
 - 出典と権利情報: [NOTICE.md](NOTICE.md)

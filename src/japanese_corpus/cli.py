@@ -8,6 +8,7 @@ from .common import write_json
 from .discover import (
     AOZORA_METADATA_URL,
     AOZORA_REPOSITORY_URL,
+    JMDICT_URL,
     WIKIMEDIA_ROOT,
     discover_sources,
 )
@@ -27,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--wikipedia-root", default=WIKIMEDIA_ROOT)
     discover.add_argument("--aozora-repository", default=AOZORA_REPOSITORY_URL)
     discover.add_argument("--aozora-metadata", default=AOZORA_METADATA_URL)
+    discover.add_argument("--jmdict-url", default=JMDICT_URL)
 
     wikipedia = subparsers.add_parser(
         "build-wikipedia", help="Build one Wikipedia corpus shard"
@@ -63,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--built-at")
     manifest.add_argument("--dictionary-manifest", type=Path)
     manifest.add_argument("--dictionary-checksums", type=Path)
+    manifest.add_argument("--english-dictionary-manifest", type=Path)
+    manifest.add_argument("--english-dictionary-checksums", type=Path)
 
     verify = subparsers.add_parser(
         "verify-assets", help="Verify uploaded Release asset names and sizes"
@@ -81,6 +85,7 @@ def main(argv: list[str] | None = None) -> None:
                 wikipedia_root=args.wikipedia_root,
                 aozora_repository=args.aozora_repository,
                 aozora_metadata=args.aozora_metadata,
+                jmdict_url=args.jmdict_url,
             ),
         )
     elif args.command == "build-wikipedia":
@@ -118,6 +123,8 @@ def main(argv: list[str] | None = None) -> None:
             built_at=args.built_at,
             dictionary_manifest_path=args.dictionary_manifest,
             dictionary_checksums_path=args.dictionary_checksums,
+            english_dictionary_manifest_path=args.english_dictionary_manifest,
+            english_dictionary_checksums_path=args.english_dictionary_checksums,
         )
     elif args.command == "verify-assets":
         verify_remote_assets(args.stats_dir, args.assets_json)

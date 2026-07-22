@@ -45,6 +45,19 @@
         "assets",
         "metadata_assets"
       ]
+    },
+    "english_dictionary": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "format",
+        "source",
+        "parameters",
+        "counts",
+        "build",
+        "assets",
+        "metadata_assets"
+      ]
     }
   },
   "additionalProperties": true

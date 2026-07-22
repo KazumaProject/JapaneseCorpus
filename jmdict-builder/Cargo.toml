@@ -1,0 +1,25 @@
+[package]
+name = "japanese-corpus-jmdict"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Build hiragana-to-English Mozc dictionaries from JMdict"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+csv = "1.4"
+flate2 = "1.1"
+quick-xml = "0.38"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+unicode-normalization = "0.1"
+zstd = { version = "0.13", features = ["zstdmt"] }
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JMdict created: 2026-07-22 -->
+<!DOCTYPE JMdict [
+<!ENTITY n "noun (common) (futsuumeishi)">
+]>
+<JMdict>
+  <entry>
+    <ent_seq>1013640</ent_seq>
+    <r_ele>
+      <reb>アート</reb>
+      <re_pri>gai1</re_pri>
+    </r_ele>
+    <sense>
+      <pos>&n;</pos>
+      <gloss xml:lang="eng">art</gloss>
+    </sense>
+  </entry>
+  <entry>
+    <ent_seq>1053350</ent_seq>
+    <r_ele>
+      <reb>コンピュータ</reb>
+      <re_pri>gai1</re_pri>
+      <re_pri>ichi1</re_pri>
+    </r_ele>
+    <r_ele>
+      <reb>コンピューター</reb>
+      <re_pri>gai1</re_pri>
+      <re_pri>ichi1</re_pri>
+    </r_ele>
+    <sense>
+      <pos>&n;</pos>
+      <gloss xml:lang="eng">computer</gloss>
+    </sense>
+  </entry>
+  <entry>
+    <ent_seq>1075000</ent_seq>
+    <r_ele>
+      <reb>センス</reb>
+      <re_pri>gai1</re_pri>
+    </r_ele>
+    <sense>
+      <lsource xml:lang="eng">sense</lsource>
+      <gloss xml:lang="eng">taste (in fashion, music, etc.)</gloss>
+    </sense>
+  </entry>
+  <entry>
+    <ent_seq>2848022</ent_seq>
+    <r_ele>
+      <reb>アート</reb>
+    </r_ele>
+    <sense>
+      <gloss xml:lang="eng">assisted reproductive technologies</gloss>
+      <gloss xml:lang="eng">ART</gloss>
+    </sense>
+  </entry>
+  <entry>
+    <ent_seq>9990001</ent_seq>
+    <r_ele><reb>テスト</reb></r_ele>
+    <r_ele><reb>テスティング</reb></r_ele>
+    <sense>
+      <stagr>テスト</stagr>
+      <gloss xml:lang="eng">test</gloss>
+      <gloss xml:lang="eng" g_type="expl">an explanatory gloss to exclude</gloss>
+    </sense>
+    <sense>
+      <stagr>テスティング</stagr>
+      <gloss xml:lang="eng">testing</gloss>
+    </sense>
+  </entry>
+  <entry>
+    <ent_seq>9990002</ent_seq>
+    <r_ele><reb>ひらがな</reb></r_ele>
+    <sense><gloss xml:lang="eng">hiragana</gloss></sense>
+  </entry>
+</JMdict>

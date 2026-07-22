@@ -12,6 +12,7 @@ AOZORA_METADATA_URL = (
     "https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip"
 )
 AOZORA_REPOSITORY_URL = "https://github.com/aozorabunko/aozorabunko.git"
+JMDICT_URL = "https://www.edrdg.org/pub/Nihongo/JMdict_e.gz"
 
 DATE_LINK_RE = re.compile(r'href=["\'](\d{8}/)["\']')
 SHARD_LINK_RE = re.compile(
@@ -25,6 +26,16 @@ def fetch_text(url: str) -> str:
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode("utf-8")
+
+
+def fetch_headers(url: str) -> dict[str, str]:
+    request = urllib.request.Request(
+        url,
+        method="HEAD",
+        headers={"User-Agent": "KazumaProject-JapaneseCorpus/0.1"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return {key.lower(): value for key, value in response.headers.items()}
 
 
 def discover_wikipedia(
@@ -82,10 +93,35 @@ def discover_git_head(repository_url: str = AOZORA_REPOSITORY_URL) -> str:
     return fields[0]
 
 
+def discover_jmdict(
+    url: str = JMDICT_URL,
+    header_fetcher: Callable[[str], dict[str, str]] = fetch_headers,
+) -> dict[str, object]:
+    headers = header_fetcher(url)
+    etag = headers.get("etag", "")
+    last_modified = headers.get("last-modified", "")
+    content_length = headers.get("content-length", "")
+    if not etag and not last_modified:
+        raise RuntimeError(f"JMdict source has no ETag or Last-Modified header: {url}")
+    try:
+        bytes_value = int(content_length) if content_length else 0
+    except ValueError as error:
+        raise RuntimeError(
+            f"JMdict source has invalid Content-Length: {content_length}"
+        ) from error
+    return {
+        "url": url,
+        "etag": etag,
+        "last_modified": last_modified,
+        "bytes": bytes_value,
+    }
+
+
 def discover_sources(
     wikipedia_root: str = WIKIMEDIA_ROOT,
     aozora_repository: str = AOZORA_REPOSITORY_URL,
     aozora_metadata: str = AOZORA_METADATA_URL,
+    jmdict_url: str = JMDICT_URL,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -95,4 +131,5 @@ def discover_sources(
             "repository_commit": discover_git_head(aozora_repository),
             "metadata_url": aozora_metadata,
         },
+        "jmdict": discover_jmdict(jmdict_url),
     }

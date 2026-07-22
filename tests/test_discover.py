@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from japanese_corpus.discover import discover_wikipedia
+from japanese_corpus.discover import discover_jmdict, discover_wikipedia
 
 
 class DiscoverWikipediaTest(unittest.TestCase):
@@ -30,6 +30,25 @@ class DiscoverWikipediaTest(unittest.TestCase):
     def test_rejects_root_without_dates(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "No dated dumps"):
             discover_wikipedia("https://example.test/", lambda _: "empty")
+
+
+class DiscoverJmdictTest(unittest.TestCase):
+    def test_records_remote_version_headers(self) -> None:
+        result = discover_jmdict(
+            "https://example.test/JMdict_e.gz",
+            lambda _: {
+                "etag": '"abc123"',
+                "last-modified": "Wed, 22 Jul 2026 03:30:21 GMT",
+                "content-length": "10512215",
+            },
+        )
+
+        self.assertEqual(result["etag"], '"abc123"')
+        self.assertEqual(result["bytes"], 10512215)
+
+    def test_requires_a_version_header(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no ETag or Last-Modified"):
+            discover_jmdict("https://example.test/JMdict_e.gz", lambda _: {})
 
 
 if __name__ == "__main__":

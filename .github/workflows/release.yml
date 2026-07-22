@@ -14,6 +14,8 @@ on:
     paths:
       - "src/**"
       - "ngram-builder/**"
+      - "jmdict-builder/**"
+      - "conversion-engine/**"
       - "schema/**"
       - "pyproject.toml"
       - "NOTICE.md"
@@ -61,6 +63,7 @@ jobs:
 
           DUMP_DATE=$(jq -r '.wikipedia.dump_date' "$DISCOVERY")
           AOZORA_COMMIT=$(jq -r '.aozora.repository_commit' "$DISCOVERY")
+          JMDICT_ETAG=$(jq -r '.jmdict.etag' "$DISCOVERY")
           VERSION="v$(date -u +%Y.%m%d).${GITHUB_RUN_NUMBER}"
           SHOULD_BUILD=true
 
@@ -68,8 +71,9 @@ jobs:
           if gh release download --pattern manifest.json --output "$PREVIOUS" 2>/dev/null; then
             PREVIOUS_DUMP=$(jq -r '.sources.wikipedia.dump_date // ""' "$PREVIOUS")
             PREVIOUS_AOZORA=$(jq -r '.sources.aozora_bunko.repository_commit // ""' "$PREVIOUS")
+            PREVIOUS_JMDICT=$(jq -r '.sources.jmdict.etag // ""' "$PREVIOUS")
             PREVIOUS_PIPELINE=$(jq -r '.release.pipeline_commit // ""' "$PREVIOUS")
-            if [[ "$FORCE_BUILD" != "true" && "$PREVIOUS_DUMP" == "$DUMP_DATE" && "$PREVIOUS_AOZORA" == "$AOZORA_COMMIT" && "$PREVIOUS_PIPELINE" == "$GITHUB_SHA" ]]; then
+            if [[ "$FORCE_BUILD" != "true" && "$PREVIOUS_DUMP" == "$DUMP_DATE" && "$PREVIOUS_AOZORA" == "$AOZORA_COMMIT" && "$PREVIOUS_JMDICT" == "$JMDICT_ETAG" && "$PREVIOUS_PIPELINE" == "$GITHUB_SHA" ]]; then
               SHOULD_BUILD=false
             fi
           fi
@@ -338,8 +342,118 @@ jobs:
             ${{ runner.temp }}/ngram-output/NGRAM-SHA256SUMS
           retention-days: 1
 
+  english-dictionary:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          command -v zstd || { sudo apt-get update && sudo apt-get install -y zstd; }
+          rustc --version
+          cargo --version
+      - name: Download source discovery
+        uses: actions/download-artifact@v4
+        with:
+          name: release-discovery
+          path: ${{ runner.temp }}/discovery
+      - name: Fetch pinned JMdict and dictionary metadata
+        run: |
+          set -euo pipefail
+          DISCOVERY="$RUNNER_TEMP/discovery/discovery.json"
+          JMDICT_URL=$(jq -r '.jmdict.url' "$DISCOVERY")
+          JMDICT_ETAG=$(jq -r '.jmdict.etag' "$DISCOVERY")
+          curl --fail --location --retry 5 --retry-all-errors \
+            --header "If-Match: $JMDICT_ETAG" \
+            --output "$RUNNER_TEMP/JMdict_e.gz" \
+            "$JMDICT_URL"
+          gzip --test "$RUNNER_TEMP/JMdict_e.gz"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/mozc-id.def" \
+            "https://raw.githubusercontent.com/google/mozc/$MOZC_COMMIT/src/data/dictionary_oss/id.def"
+          echo "$MOZC_ID_DEF_SHA256  $RUNNER_TEMP/mozc-id.def" | sha256sum --check
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/JMDICT-LICENSE.html" \
+            https://www.edrdg.org/edrdg/licence.html
+      - name: Build and test hiragana-to-English dictionary
+        run: |
+          set -euo pipefail
+          DISCOVERY="$RUNNER_TEMP/discovery/discovery.json"
+          JMDICT_URL=$(jq -r '.jmdict.url' "$DISCOVERY")
+          JMDICT_ETAG=$(jq -r '.jmdict.etag' "$DISCOVERY")
+          JMDICT_LAST_MODIFIED=$(jq -r '.jmdict.last_modified' "$DISCOVERY")
+          OUTPUT="$RUNNER_TEMP/english-output"
+          mkdir -p "$OUTPUT"
+          cargo run --release --locked \
+            --manifest-path jmdict-builder/Cargo.toml -- build \
+            --input "$RUNNER_TEMP/JMdict_e.gz" \
+            --mozc-id-def "$RUNNER_TEMP/mozc-id.def" \
+            --jmdict-license "$RUNNER_TEMP/JMDICT-LICENSE.html" \
+            --output-dir "$OUTPUT" \
+            --entries-per-shard 1000000 \
+            --base-cost 12000 \
+            --source-url "$JMDICT_URL" \
+            --source-etag "$JMDICT_ETAG" \
+            --source-last-modified "$JMDICT_LAST_MODIFIED" \
+            --pipeline-commit "$GITHUB_SHA"
+
+          while IFS= read -r -d '' ASSET; do
+            zstd --test "$ASSET"
+            zstd --decompress --stdout "$ASSET" | awk -F '\t' '
+              NF != 5 { print "invalid Mozc column count at line " NR > "/dev/stderr"; exit 1 }
+              $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ {
+                print "invalid numeric Mozc field at line " NR > "/dev/stderr"; exit 1
+              }
+            '
+          done < <(find "$OUTPUT" -maxdepth 1 -type f -name 'mozc-english-unigram-*.txt.zst' -print0 | sort -z)
+          jq -e '.counts.retained_entries > 100000 and .counts.unique_readings > 60000' \
+            "$OUTPUT/english-dictionary-manifest.json" >/dev/null
+          (cd "$OUTPUT" && sha256sum --check ENGLISH-DICTIONARY-SHA256SUMS)
+
+          COMPUTER=$(cargo run --quiet --release --locked \
+            --manifest-path conversion-engine/Cargo.toml -- \
+            --dictionary "$OUTPUT" --candidates 10 こんぴゅーた)
+          ART=$(cargo run --quiet --release --locked \
+            --manifest-path conversion-engine/Cargo.toml -- \
+            --dictionary "$OUTPUT" --candidates 10 あーと)
+          grep -q $'\tcomputer$' <<<"$COMPUTER"
+          grep -q $'\tart$' <<<"$ART"
+      - name: Upload English dictionary assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUTPUT="$RUNNER_TEMP/english-output"
+          mapfile -d '' ASSETS < <(find "$OUTPUT" -maxdepth 1 -type f -print0 | sort -z)
+          gh release upload "$RELEASE_TAG" "${ASSETS[@]}"
+          gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/english-remote-assets.json"
+          for ASSET in "${ASSETS[@]}"; do
+            NAME=$(basename "$ASSET")
+            LOCAL_SIZE=$(stat --format='%s' "$ASSET")
+            REMOTE_SIZE=$(jq -r --arg name "$NAME" '.assets[] | select(.name == $name) | .size' \
+              "$RUNNER_TEMP/english-remote-assets.json")
+            if [[ "$REMOTE_SIZE" != "$LOCAL_SIZE" ]]; then
+              echo "Uploaded English dictionary asset size mismatch: $NAME local=$LOCAL_SIZE remote=$REMOTE_SIZE" >&2
+              exit 1
+            fi
+          done
+      - name: Save English dictionary metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: english-dictionary-metadata
+          path: |
+            ${{ runner.temp }}/english-output/english-dictionary-manifest.json
+            ${{ runner.temp }}/english-output/ENGLISH-DICTIONARY-SHA256SUMS
+          retention-days: 1
+
   finalize:
-    needs: [prepare, wikipedia, aozora, dictionary]
+    needs: [prepare, wikipedia, aozora, dictionary, english-dictionary]
     if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -365,6 +479,11 @@ jobs:
         with:
           name: ngram-metadata
           path: ${{ runner.temp }}/ngram
+      - name: Download English dictionary metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: english-dictionary-metadata
+          path: ${{ runner.temp }}/english
       - name: Verify, publish, and prune releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -386,13 +505,17 @@ jobs:
             --version "$RELEASE_TAG" \
             --pipeline-commit "$GITHUB_SHA" \
             --dictionary-manifest "$RUNNER_TEMP/ngram/ngram-manifest.json" \
-            --dictionary-checksums "$RUNNER_TEMP/ngram/NGRAM-SHA256SUMS"
+            --dictionary-checksums "$RUNNER_TEMP/ngram/NGRAM-SHA256SUMS" \
+            --english-dictionary-manifest "$RUNNER_TEMP/english/english-dictionary-manifest.json" \
+            --english-dictionary-checksums "$RUNNER_TEMP/english/ENGLISH-DICTIONARY-SHA256SUMS"
 
           RECORDS=$(jq -r '.totals.records' "$RUNNER_TEMP/manifest.json")
           CHARACTERS=$(jq -r '.totals.characters' "$RUNNER_TEMP/manifest.json")
           UNIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 1) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           BIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 2) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           TRIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 3) | .retained_entries' "$RUNNER_TEMP/manifest.json")
+          ENGLISH_ENTRIES=$(jq -r '.english_dictionary.counts.retained_entries' "$RUNNER_TEMP/manifest.json")
+          JMDICT_CREATED=$(jq -r '.sources.jmdict.created' "$RUNNER_TEMP/manifest.json")
           AOZORA_SHORT=${AOZORA_COMMIT:0:12}
           {
             echo "Automated Japanese corpus release."
@@ -404,8 +527,10 @@ jobs:
             echo "- Mozc unigram entries: $UNIGRAMS"
             echo "- Mozc bigram entries: $BIGRAMS"
             echo "- Mozc trigram entries: $TRIGRAMS"
+            echo "- JMdict source date: $JMDICT_CREATED"
+            echo "- Hiragana-to-English entries: $ENGLISH_ENTRIES"
             echo
-            echo "See manifest.json, SHA256SUMS, ngram-manifest.json, and NOTICE.md for provenance and verification."
+            echo "See manifest.json, SHA256SUMS, the dictionary manifests, and NOTICE.md for provenance and verification."
           } > "$RUNNER_TEMP/release-notes.md"
 
           gh release upload "$RELEASE_TAG" \
@@ -415,7 +540,8 @@ jobs:
             LICENSE-DATA.md \
             schema/corpus-record.schema.json \
             schema/release-manifest.schema.json \
-            schema/ngram-manifest.schema.json
+            schema/ngram-manifest.schema.json \
+            schema/english-dictionary-manifest.schema.json
           gh release edit "$RELEASE_TAG" \
             --draft=false \
             --latest \
