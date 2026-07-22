@@ -32,6 +32,19 @@
     "totals": {
       "type": "object",
       "required": ["assets", "records", "characters", "bytes"]
+    },
+    "dictionaries": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "format",
+        "tokenizer",
+        "parameters",
+        "corpus",
+        "orders",
+        "assets",
+        "metadata_assets"
+      ]
     }
   },
   "additionalProperties": true

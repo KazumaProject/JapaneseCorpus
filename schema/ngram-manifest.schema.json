@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/ngram-manifest.schema.json",
+  "title": "JapaneseCorpus Mozc n-gram dictionary manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "format",
+    "tokenizer",
+    "parameters",
+    "corpus",
+    "orders",
+    "assets"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "format": {
+      "type": "object",
+      "required": ["name", "columns", "encoding", "compression", "cost"]
+    },
+    "tokenizer": {
+      "type": "object",
+      "required": [
+        "implementation",
+        "implementation_version",
+        "dictionary",
+        "dictionary_version",
+        "mozc_context_id_commit"
+      ]
+    },
+    "parameters": {
+      "type": "object",
+      "required": [
+        "unigram_min_count",
+        "ngram_min_count",
+        "map_min_count",
+        "exact_count_guarantee",
+        "cost_scale",
+        "entries_per_shard"
+      ]
+    },
+    "corpus": {
+      "type": "object",
+      "required": [
+        "input_assets",
+        "documents",
+        "sentences",
+        "valid_tokens",
+        "raw_unique_tokens",
+        "pipeline_commit"
+      ]
+    },
+    "orders": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["order", "total_observations", "retained_entries"]
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 6,
+      "items": {
+        "type": "object",
+        "required": ["name", "bytes", "sha256"]
+      }
+    }
+  },
+  "additionalProperties": true
+}

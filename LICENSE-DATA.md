@@ -16,3 +16,8 @@ URLs are retained as requested by Aozora Bunko's file-handling guidelines.
 
 This notice does not replace the terms attached to either upstream source. See
 `NOTICE.md` for source details.
+
+The generated Mozc-format n-gram dictionaries are derived from the same corpus
+and are distributed under CC BY-SA 4.0. The bundled Mozc context-ID definition
+and third-party notice files retain their respective upstream terms; see the
+Release assets `MOZC-LICENSE`, `IPADIC-COPYING`, and `IPADIC-NOTICE`.

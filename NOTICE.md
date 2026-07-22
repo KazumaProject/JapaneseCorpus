@@ -28,6 +28,26 @@ The source selection and future kana-kanji conversion use case were informed by
 [Akaza](https://github.com/akaza-im/akaza), an MIT-licensed Japanese input
 method. JapaneseCorpus has its own extraction and packaging implementation.
 
+## Mozc context IDs and dictionary format
+
+- Source: <https://github.com/google/mozc>
+- Pinned commit: `3f235b4eb6fcff7d14ef5f0fb8ee56de7ee4c732`
+- Included file: `src/data/dictionary_oss/id.def` as Release asset `mozc-id.def`
+- License: the Mozc and dictionary notices in the included `MOZC-LICENSE`
+
+The generated dictionaries use the five-column text format consumed by Mozc's
+system dictionary loader. Mozc itself and its original word dictionary are not
+redistributed, apart from the matching context-ID definition and required notice.
+
+## Vibrato and IPADIC
+
+- Vibrato: <https://github.com/daac-tools/vibrato>, version 0.5.2, MIT license
+- Dictionary archive: Vibrato release v0.5.0, `ipadic-mecab-2_7_0`
+- IPADIC: version 2.7.0, NAIST/ICOT terms
+
+Vibrato and IPADIC are used for morphological analysis and readings. The Release
+includes `IPADIC-COPYING` and `IPADIC-NOTICE` alongside the generated dictionaries.
+
 ## Pipeline code
 
 The source code and configuration in this repository are licensed under the

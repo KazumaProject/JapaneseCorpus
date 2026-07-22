@@ -13,6 +13,7 @@ on:
     branches: [main]
     paths:
       - "src/**"
+      - "ngram-builder/**"
       - "schema/**"
       - "pyproject.toml"
       - "NOTICE.md"
@@ -25,6 +26,12 @@ permissions:
 concurrency:
   group: corpus-release
   cancel-in-progress: false
+
+env:
+  MOZC_COMMIT: 3f235b4eb6fcff7d14ef5f0fb8ee56de7ee4c732
+  MOZC_ID_DEF_SHA256: 07a05a268c3783b7e02b36e4aa591555a2dd19a1f3c93891576740761c154f2d
+  VIBRATO_IPADIC_VERSION: v0.5.0-ipadic-mecab-2_7_0
+  VIBRATO_IPADIC_ARCHIVE_SHA256: 4764f983b7c3a9e1cb6a5ee945e00558efd812980e0dad61224f63ee3b0475d9
 
 jobs:
   prepare:
@@ -198,8 +205,141 @@ jobs:
           path: ${{ runner.temp }}/aozora.stats.json
           retention-days: 1
 
-  finalize:
+  dictionary:
     needs: [prepare, wikipedia, aozora]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          command -v zstd || { sudo apt-get update && sudo apt-get install -y zstd xz-utils; }
+          rustc --version
+          cargo --version
+      - name: Download and verify draft corpus assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/corpus"
+          gh release download "$RELEASE_TAG" \
+            --pattern 'wikipedia-*.jsonl.zst' \
+            --pattern 'aozora-*.jsonl.zst' \
+            --dir "$RUNNER_TEMP/corpus"
+          EXPECTED=$(jq 'length + 1' <<< '${{ needs.prepare.outputs.matrix }}')
+          ACTUAL=$(find "$RUNNER_TEMP/corpus" -maxdepth 1 -type f -name '*.jsonl.zst' | wc -l)
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "Expected $EXPECTED corpus assets, downloaded $ACTUAL." >&2
+            exit 1
+          fi
+          find "$RUNNER_TEMP/corpus" -maxdepth 1 -type f -name '*.jsonl.zst' \
+            -print0 | sort -z | xargs -0 -n1 zstd --test
+      - name: Fetch pinned tokenizer and Mozc context definitions
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/vibrato-ipadic.tar.xz" \
+            https://github.com/daac-tools/vibrato/releases/download/v0.5.0/ipadic-mecab-2_7_0.tar.xz
+          echo "$VIBRATO_IPADIC_ARCHIVE_SHA256  $RUNNER_TEMP/vibrato-ipadic.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/vibrato"
+          tar -xJf "$RUNNER_TEMP/vibrato-ipadic.tar.xz" -C "$RUNNER_TEMP/vibrato"
+          zstd --decompress --force \
+            "$RUNNER_TEMP/vibrato/ipadic-mecab-2_7_0/system.dic.zst" \
+            -o "$RUNNER_TEMP/vibrato/system.dic"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/mozc-id.def" \
+            "https://raw.githubusercontent.com/google/mozc/$MOZC_COMMIT/src/data/dictionary_oss/id.def"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/MOZC-LICENSE" \
+            "https://raw.githubusercontent.com/google/mozc/$MOZC_COMMIT/LICENSE"
+          echo "$MOZC_ID_DEF_SHA256  $RUNNER_TEMP/mozc-id.def" | sha256sum --check
+      - name: Build exact full-corpus Mozc n-gram dictionaries
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ngram-output" "$RUNNER_TEMP/ngram-work"
+          mapfile -d '' INPUTS < <(
+            find "$RUNNER_TEMP/corpus" -maxdepth 1 -type f -name '*.jsonl.zst' \
+              -print0 | sort -z
+          )
+          INPUT_ARGS=()
+          for INPUT in "${INPUTS[@]}"; do
+            INPUT_ARGS+=(--input "$INPUT")
+          done
+          cargo run --release --locked \
+            --manifest-path ngram-builder/Cargo.toml -- build \
+            "${INPUT_ARGS[@]}" \
+            --vibrato-dictionary "$RUNNER_TEMP/vibrato/system.dic" \
+            --mozc-id-def "$RUNNER_TEMP/mozc-id.def" \
+            --mozc-license "$RUNNER_TEMP/MOZC-LICENSE" \
+            --ipadic-copying "$RUNNER_TEMP/vibrato/ipadic-mecab-2_7_0/COPYING" \
+            --ipadic-notice "$RUNNER_TEMP/vibrato/ipadic-mecab-2_7_0/NOTICE" \
+            --output-dir "$RUNNER_TEMP/ngram-output" \
+            --work-dir "$RUNNER_TEMP/ngram-work" \
+            --unigram-min-count 16 \
+            --ngram-min-count 32 \
+            --map-min-count 2 \
+            --cost-scale 800 \
+            --entries-per-shard 1000000 \
+            --mozc-commit "$MOZC_COMMIT" \
+            --vibrato-dictionary-version "$VIBRATO_IPADIC_VERSION" \
+            --pipeline-commit "$GITHUB_SHA"
+      - name: Validate and upload dictionary assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUTPUT="$RUNNER_TEMP/ngram-output"
+          while IFS= read -r -d '' ASSET; do
+            zstd --test "$ASSET"
+            zstd --decompress --stdout "$ASSET" | awk -F '\t' '
+              NF != 5 { print "invalid Mozc column count at line " NR > "/dev/stderr"; exit 1 }
+              $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ {
+                print "invalid numeric Mozc field at line " NR > "/dev/stderr"; exit 1
+              }
+            '
+          done < <(find "$OUTPUT" -maxdepth 1 -type f -name 'mozc-*.txt.zst' -print0 | sort -z)
+          jq -e '.orders | length == 3 and all(.retained_entries > 0)' \
+            "$OUTPUT/ngram-manifest.json" >/dev/null
+          (cd "$OUTPUT" && sha256sum --check NGRAM-SHA256SUMS)
+
+          while IFS= read -r -d '' ASSET; do
+            SIZE=$(stat --format='%s' "$ASSET")
+            if (( SIZE >= 2147483648 )); then
+              echo "Release asset exceeds 2 GiB: $ASSET" >&2
+              exit 1
+            fi
+          done < <(find "$OUTPUT" -maxdepth 1 -type f -print0)
+          mapfile -d '' ASSETS < <(find "$OUTPUT" -maxdepth 1 -type f -print0 | sort -z)
+          gh release upload "$RELEASE_TAG" "${ASSETS[@]}"
+          gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/ngram-remote-assets.json"
+          for ASSET in "${ASSETS[@]}"; do
+            NAME=$(basename "$ASSET")
+            LOCAL_SIZE=$(stat --format='%s' "$ASSET")
+            REMOTE_SIZE=$(jq -r --arg name "$NAME" '.assets[] | select(.name == $name) | .size' \
+              "$RUNNER_TEMP/ngram-remote-assets.json")
+            if [[ "$REMOTE_SIZE" != "$LOCAL_SIZE" ]]; then
+              echo "Uploaded dictionary asset size mismatch: $NAME local=$LOCAL_SIZE remote=$REMOTE_SIZE" >&2
+              exit 1
+            fi
+          done
+      - name: Save dictionary metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngram-metadata
+          path: |
+            ${{ runner.temp }}/ngram-output/ngram-manifest.json
+            ${{ runner.temp }}/ngram-output/NGRAM-SHA256SUMS
+          retention-days: 1
+
+  finalize:
+    needs: [prepare, wikipedia, aozora, dictionary]
     if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -220,6 +360,11 @@ jobs:
         with:
           name: release-discovery
           path: ${{ runner.temp }}/discovery
+      - name: Download dictionary metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: ngram-metadata
+          path: ${{ runner.temp }}/ngram
       - name: Verify, publish, and prune releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -239,10 +384,15 @@ jobs:
             --output "$RUNNER_TEMP/manifest.json" \
             --checksums "$RUNNER_TEMP/SHA256SUMS" \
             --version "$RELEASE_TAG" \
-            --pipeline-commit "$GITHUB_SHA"
+            --pipeline-commit "$GITHUB_SHA" \
+            --dictionary-manifest "$RUNNER_TEMP/ngram/ngram-manifest.json" \
+            --dictionary-checksums "$RUNNER_TEMP/ngram/NGRAM-SHA256SUMS"
 
           RECORDS=$(jq -r '.totals.records' "$RUNNER_TEMP/manifest.json")
           CHARACTERS=$(jq -r '.totals.characters' "$RUNNER_TEMP/manifest.json")
+          UNIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 1) | .retained_entries' "$RUNNER_TEMP/manifest.json")
+          BIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 2) | .retained_entries' "$RUNNER_TEMP/manifest.json")
+          TRIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 3) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           AOZORA_SHORT=${AOZORA_COMMIT:0:12}
           {
             echo "Automated Japanese corpus release."
@@ -251,8 +401,11 @@ jobs:
             echo "- Aozora Bunko repository commit: $AOZORA_SHORT"
             echo "- Documents: $RECORDS"
             echo "- Characters: $CHARACTERS"
+            echo "- Mozc unigram entries: $UNIGRAMS"
+            echo "- Mozc bigram entries: $BIGRAMS"
+            echo "- Mozc trigram entries: $TRIGRAMS"
             echo
-            echo "See manifest.json, SHA256SUMS, and NOTICE.md for provenance and verification."
+            echo "See manifest.json, SHA256SUMS, ngram-manifest.json, and NOTICE.md for provenance and verification."
           } > "$RUNNER_TEMP/release-notes.md"
 
           gh release upload "$RELEASE_TAG" \
@@ -261,7 +414,8 @@ jobs:
             NOTICE.md \
             LICENSE-DATA.md \
             schema/corpus-record.schema.json \
-            schema/release-manifest.schema.json
+            schema/release-manifest.schema.json \
+            schema/ngram-manifest.schema.json
           gh release edit "$RELEASE_TAG" \
             --draft=false \
             --latest \

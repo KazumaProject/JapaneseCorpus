@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--version", required=True)
     manifest.add_argument("--pipeline-commit", required=True)
     manifest.add_argument("--built-at")
+    manifest.add_argument("--dictionary-manifest", type=Path)
+    manifest.add_argument("--dictionary-checksums", type=Path)
 
     verify = subparsers.add_parser(
         "verify-assets", help="Verify uploaded Release asset names and sizes"
@@ -114,6 +116,8 @@ def main(argv: list[str] | None = None) -> None:
             version=args.version,
             pipeline_commit=args.pipeline_commit,
             built_at=args.built_at,
+            dictionary_manifest_path=args.dictionary_manifest,
+            dictionary_checksums_path=args.dictionary_checksums,
         )
     elif args.command == "verify-assets":
         verify_remote_assets(args.stats_dir, args.assets_json)

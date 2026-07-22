@@ -6,4 +6,5 @@ build/
 dist/
 work/
 *.egg-info/
+ngram-builder/target/
 .DS_Store

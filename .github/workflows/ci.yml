@@ -27,4 +27,56 @@ jobs:
         run: |
           python -m json.tool schema/corpus-record.schema.json >/dev/null
           python -m json.tool schema/release-manifest.schema.json >/dev/null
+          python -m json.tool schema/ngram-manifest.schema.json >/dev/null
           PYTHONPATH=src python -m japanese_corpus --help >/dev/null
+      - name: Test n-gram dictionary builder
+        run: |
+          rustup component add rustfmt
+          cargo fmt --manifest-path ngram-builder/Cargo.toml -- --check
+          cargo test --locked --manifest-path ngram-builder/Cargo.toml
+      - name: Run n-gram integration test
+        run: |
+          set -euo pipefail
+          INTEGRATION=$(mktemp -d)
+          mkdir -p "$INTEGRATION/vibrato" "$INTEGRATION/output" "$INTEGRATION/work"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$INTEGRATION/vibrato.tar.xz" \
+            https://github.com/daac-tools/vibrato/releases/download/v0.5.0/ipadic-mecab-2_7_0.tar.xz
+          echo "4764f983b7c3a9e1cb6a5ee945e00558efd812980e0dad61224f63ee3b0475d9  $INTEGRATION/vibrato.tar.xz" | sha256sum --check
+          tar -xJf "$INTEGRATION/vibrato.tar.xz" -C "$INTEGRATION/vibrato"
+          zstd --decompress --force \
+            "$INTEGRATION/vibrato/ipadic-mecab-2_7_0/system.dic.zst" \
+            -o "$INTEGRATION/vibrato/system.dic"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$INTEGRATION/mozc-id.def" \
+            https://raw.githubusercontent.com/google/mozc/3f235b4eb6fcff7d14ef5f0fb8ee56de7ee4c732/src/data/dictionary_oss/id.def
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$INTEGRATION/MOZC-LICENSE" \
+            https://raw.githubusercontent.com/google/mozc/3f235b4eb6fcff7d14ef5f0fb8ee56de7ee4c732/LICENSE
+          echo "07a05a268c3783b7e02b36e4aa591555a2dd19a1f3c93891576740761c154f2d  $INTEGRATION/mozc-id.def" | sha256sum --check
+          zstd --quiet --force tests/fixtures/ngram-corpus.jsonl \
+            -o "$INTEGRATION/corpus.jsonl.zst"
+
+          cargo run --locked --manifest-path ngram-builder/Cargo.toml -- build \
+            --input "$INTEGRATION/corpus.jsonl.zst" \
+            --vibrato-dictionary "$INTEGRATION/vibrato/system.dic" \
+            --mozc-id-def "$INTEGRATION/mozc-id.def" \
+            --mozc-license "$INTEGRATION/MOZC-LICENSE" \
+            --ipadic-copying "$INTEGRATION/vibrato/ipadic-mecab-2_7_0/COPYING" \
+            --ipadic-notice "$INTEGRATION/vibrato/ipadic-mecab-2_7_0/NOTICE" \
+            --output-dir "$INTEGRATION/output" \
+            --work-dir "$INTEGRATION/work" \
+            --unigram-min-count 1 \
+            --ngram-min-count 2 \
+            --map-min-count 2 \
+            --entries-per-shard 100 \
+            --mozc-commit 3f235b4eb6fcff7d14ef5f0fb8ee56de7ee4c732 \
+            --vibrato-dictionary-version v0.5.0-ipadic-mecab-2_7_0 \
+            --pipeline-commit "$GITHUB_SHA"
+          (cd "$INTEGRATION/output" && sha256sum --check NGRAM-SHA256SUMS)
+          for ASSET in "$INTEGRATION"/output/mozc-*.txt.zst; do
+            zstd --test "$ASSET"
+            zstd --decompress --stdout "$ASSET" | awk -F '\t' 'NF != 5 { exit 1 }'
+          done
+          jq -e '.orders | length == 3 and all(.retained_entries > 0)' \
+            "$INTEGRATION/output/ngram-manifest.json" >/dev/null

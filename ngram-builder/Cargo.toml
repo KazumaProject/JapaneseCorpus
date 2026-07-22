@@ -1,0 +1,22 @@
+[package]
+name = "japanese-corpus-ngram"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Full-corpus Mozc-format n-gram dictionary builder"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+csv = "1.4"
+rayon = "1.10"
+rustc-hash = "2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+vibrato = "0.5.2"
+zstd = { version = "0.13", features = ["zstdmt"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

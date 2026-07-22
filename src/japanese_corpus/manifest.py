@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,8 @@ def build_manifest(
     version: str,
     pipeline_commit: str,
     built_at: str | None = None,
+    dictionary_manifest_path: Path | None = None,
+    dictionary_checksums_path: Path | None = None,
 ) -> dict[str, Any]:
     stats = load_stats(stats_directory)
     with discovery_path.open(encoding="utf-8") as stream:
@@ -69,6 +72,17 @@ def build_manifest(
     ]
     assets.sort(key=lambda item: item["name"])
 
+    dictionaries = None
+    dictionary_checksum_entries: list[tuple[str, str]] = []
+    if dictionary_manifest_path is not None or dictionary_checksums_path is not None:
+        if dictionary_manifest_path is None or dictionary_checksums_path is None:
+            raise RuntimeError(
+                "Dictionary manifest and checksum paths must be provided together"
+            )
+        dictionaries, dictionary_checksum_entries = load_dictionary_metadata(
+            dictionary_manifest_path, dictionary_checksums_path
+        )
+
     manifest = {
         "schema_version": 1,
         "release": {
@@ -96,13 +110,104 @@ def build_manifest(
             "records": sum(item["records"] for item in assets),
             "characters": sum(item["characters"] for item in assets),
             "bytes": sum(item["bytes"] for item in assets),
+            **(
+                {
+                    "dictionary_assets": len(dictionaries["assets"]),
+                    "dictionary_entries": sum(
+                        int(order["retained_entries"])
+                        for order in dictionaries["orders"]
+                    ),
+                    "dictionary_bytes": sum(
+                        int(item["bytes"]) for item in dictionaries["assets"]
+                    ),
+                }
+                if dictionaries is not None
+                else {}
+            ),
         },
+        **({"dictionaries": dictionaries} if dictionaries is not None else {}),
     }
     write_json(output_path, manifest)
     with checksums_path.open("w", encoding="utf-8", newline="\n") as stream:
         for item in assets:
             stream.write(f"{item['sha256']}  {item['name']}\n")
+        for digest, name in dictionary_checksum_entries:
+            stream.write(f"{digest}  {name}\n")
     return manifest
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_dictionary_metadata(
+    manifest_path: Path, checksums_path: Path
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    with manifest_path.open(encoding="utf-8") as stream:
+        dictionary = json.load(stream)
+    required = {
+        "schema_version",
+        "format",
+        "tokenizer",
+        "parameters",
+        "corpus",
+        "orders",
+        "assets",
+    }
+    missing = required - dictionary.keys()
+    if missing:
+        raise RuntimeError(f"Dictionary manifest is missing fields: {sorted(missing)}")
+    if dictionary["schema_version"] != 1:
+        raise RuntimeError("Unsupported dictionary manifest schema")
+
+    sums: dict[str, str] = {}
+    with checksums_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            line = line.rstrip("\n")
+            try:
+                digest, name = line.split("  ", 1)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"Malformed dictionary checksum line {line_number}"
+                ) from error
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise RuntimeError(
+                    f"Invalid SHA-256 on dictionary checksum line {line_number}"
+                )
+            sums[name] = digest
+
+    entries: list[tuple[str, str]] = []
+    for asset in dictionary["assets"]:
+        required_asset = {"name", "bytes", "sha256"}
+        missing_asset = required_asset - asset.keys()
+        if missing_asset:
+            raise RuntimeError(
+                f"Dictionary asset is missing fields: {sorted(missing_asset)}"
+            )
+        if int(asset["bytes"]) >= MAX_RELEASE_ASSET_BYTES:
+            raise RuntimeError(f"{asset['name']} exceeds GitHub's 2 GiB asset limit")
+        if sums.get(asset["name"]) != asset["sha256"]:
+            raise RuntimeError(f"Checksum mismatch for dictionary asset {asset['name']}")
+        entries.append((asset["sha256"], asset["name"]))
+
+    manifest_name = "ngram-manifest.json"
+    manifest_digest = _sha256(manifest_path)
+    if sums.get(manifest_name) != manifest_digest:
+        raise RuntimeError("Dictionary manifest checksum mismatch")
+    entries.extend(
+        [
+            (manifest_digest, manifest_name),
+            (_sha256(checksums_path), "NGRAM-SHA256SUMS"),
+        ]
+    )
+    dictionary["metadata_assets"] = [manifest_name, "NGRAM-SHA256SUMS"]
+    return dictionary, entries
 
 
 def verify_remote_assets(stats_directory: Path, assets_json: Path) -> None:
