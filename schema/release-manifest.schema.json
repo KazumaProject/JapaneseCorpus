@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/release-manifest.schema.json",
+  "title": "JapaneseCorpus release manifest",
+  "type": "object",
+  "required": ["schema_version", "release", "sources", "assets", "totals"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "release": {
+      "type": "object",
+      "required": ["version", "built_at", "pipeline_commit"]
+    },
+    "sources": {
+      "type": "object",
+      "required": ["wikipedia", "aozora_bunko"]
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "source",
+          "records",
+          "characters",
+          "bytes",
+          "sha256"
+        ]
+      }
+    },
+    "totals": {
+      "type": "object",
+      "required": ["assets", "records", "characters", "bytes"]
+    }
+  },
+  "additionalProperties": true
+}

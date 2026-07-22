@@ -1,0 +1,284 @@
+name: Build and publish corpus
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when source versions are unchanged
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "schema/**"
+      - "pyproject.toml"
+      - "NOTICE.md"
+      - "LICENSE-DATA.md"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corpus-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      should_build: ${{ steps.prepare.outputs.should_build }}
+      matrix: ${{ steps.prepare.outputs.matrix }}
+      dump_date: ${{ steps.prepare.outputs.dump_date }}
+      aozora_commit: ${{ steps.prepare.outputs.aozora_commit }}
+      version: ${{ steps.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Discover sources and create draft release
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_BUILD: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          DISCOVERY="$RUNNER_TEMP/discovery.json"
+          PYTHONPATH=src python -m japanese_corpus discover --output "$DISCOVERY"
+
+          DUMP_DATE=$(jq -r '.wikipedia.dump_date' "$DISCOVERY")
+          AOZORA_COMMIT=$(jq -r '.aozora.repository_commit' "$DISCOVERY")
+          VERSION="v$(date -u +%Y.%m%d).${GITHUB_RUN_NUMBER}"
+          SHOULD_BUILD=true
+
+          PREVIOUS="$RUNNER_TEMP/previous-manifest.json"
+          if gh release download --pattern manifest.json --output "$PREVIOUS" 2>/dev/null; then
+            PREVIOUS_DUMP=$(jq -r '.sources.wikipedia.dump_date // ""' "$PREVIOUS")
+            PREVIOUS_AOZORA=$(jq -r '.sources.aozora_bunko.repository_commit // ""' "$PREVIOUS")
+            PREVIOUS_PIPELINE=$(jq -r '.release.pipeline_commit // ""' "$PREVIOUS")
+            if [[ "$FORCE_BUILD" != "true" && "$PREVIOUS_DUMP" == "$DUMP_DATE" && "$PREVIOUS_AOZORA" == "$AOZORA_COMMIT" && "$PREVIOUS_PIPELINE" == "$GITHUB_SHA" ]]; then
+              SHOULD_BUILD=false
+            fi
+          fi
+
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(jq -c '.wikipedia.shards' "$DISCOVERY")" >> "$GITHUB_OUTPUT"
+          echo "dump_date=$DUMP_DATE" >> "$GITHUB_OUTPUT"
+          echo "aozora_commit=$AOZORA_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if [[ "$SHOULD_BUILD" != "true" ]]; then
+            exit 0
+          fi
+
+          IMMUTABLE=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '[.[] | select(.draft == false and (.immutable // false))] | length')
+          if [[ "$IMMUTABLE" != "0" ]]; then
+            echo "An immutable published release exists; it cannot be replaced." >&2
+            exit 1
+          fi
+
+          while IFS= read -r STALE_TAG; do
+            [[ -z "$STALE_TAG" ]] || gh release delete "$STALE_TAG" --cleanup-tag --yes
+          done < <(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | select(.draft == true and (.tag_name | startswith("v"))) | .tag_name')
+
+          gh release create "$VERSION" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "JapaneseCorpus $VERSION" \
+            --notes "Corpus build in progress."
+      - name: Save source discovery
+        if: steps.prepare.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-discovery
+          path: ${{ runner.temp }}/discovery.json
+          retention-days: 1
+
+  wikipedia:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install system dependencies
+        run: command -v zstd || { sudo apt-get update && sudo apt-get install -y zstd; }
+      - name: Build and upload Wikipedia shard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+          DUMP_DATE: ${{ needs.prepare.outputs.dump_date }}
+          SHARD_URL: ${{ matrix.shard.url }}
+          SHARD_SEQUENCE: ${{ matrix.shard.sequence }}
+        run: |
+          set -euo pipefail
+          INPUT="$RUNNER_TEMP/${SHARD_SEQUENCE}.json.bz2"
+          OUTPUT="$RUNNER_TEMP/wikipedia-${DUMP_DATE}-${SHARD_SEQUENCE}.jsonl.zst"
+          STATS="$RUNNER_TEMP/wikipedia-${SHARD_SEQUENCE}.stats.json"
+          curl --fail --location --retry 5 --retry-all-errors --output "$INPUT" "$SHARD_URL"
+          PYTHONPATH=src python -m japanese_corpus build-wikipedia \
+            "$INPUT" "$OUTPUT" --dump-date "$DUMP_DATE" --stats "$STATS"
+          zstd --test "$OUTPUT"
+          gh release upload "$RELEASE_TAG" "$OUTPUT"
+      - name: Save Wikipedia statistics
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats-wikipedia-${{ matrix.shard.sequence }}
+          path: ${{ runner.temp }}/wikipedia-${{ matrix.shard.sequence }}.stats.json
+          retention-days: 1
+
+  aozora:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install system dependencies
+        run: command -v zstd || { sudo apt-get update && sudo apt-get install -y zstd; }
+      - name: Fetch Aozora Bunko sources
+        env:
+          AOZORA_COMMIT: ${{ needs.prepare.outputs.aozora_commit }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/aozora-metadata.zip" \
+            https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip
+          PYTHONPATH=src python -m japanese_corpus list-aozora-paths \
+            --metadata-zip "$RUNNER_TEMP/aozora-metadata.zip" \
+            --output "$RUNNER_TEMP/aozora-paths.txt"
+
+          SOURCE="$RUNNER_TEMP/aozorabunko"
+          git init "$SOURCE"
+          git -C "$SOURCE" remote add origin https://github.com/aozorabunko/aozorabunko.git
+          git -C "$SOURCE" sparse-checkout init --no-cone
+          git -C "$SOURCE" sparse-checkout set --no-cone --stdin < "$RUNNER_TEMP/aozora-paths.txt"
+          git -C "$SOURCE" fetch --depth=1 --filter=blob:none origin "$AOZORA_COMMIT"
+          git -C "$SOURCE" checkout --detach FETCH_HEAD
+      - name: Build and upload Aozora Bunko corpus
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+          AOZORA_COMMIT: ${{ needs.prepare.outputs.aozora_commit }}
+        run: |
+          set -euo pipefail
+          SHORT_COMMIT=${AOZORA_COMMIT:0:12}
+          OUTPUT="$RUNNER_TEMP/aozora-${SHORT_COMMIT}.jsonl.zst"
+          STATS="$RUNNER_TEMP/aozora.stats.json"
+          PYTHONPATH=src python -m japanese_corpus build-aozora \
+            --metadata-zip "$RUNNER_TEMP/aozora-metadata.zip" \
+            --source-root "$RUNNER_TEMP/aozorabunko" \
+            --output "$OUTPUT" \
+            --stats "$STATS" \
+            --source-commit "$AOZORA_COMMIT"
+          zstd --test "$OUTPUT"
+          gh release upload "$RELEASE_TAG" "$OUTPUT"
+      - name: Save Aozora Bunko statistics
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats-aozora
+          path: ${{ runner.temp }}/aozora.stats.json
+          retention-days: 1
+
+  finalize:
+    needs: [prepare, wikipedia, aozora]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download build metadata
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stats-*
+          path: ${{ runner.temp }}/stats
+          merge-multiple: true
+      - name: Download source discovery
+        uses: actions/download-artifact@v4
+        with:
+          name: release-discovery
+          path: ${{ runner.temp }}/discovery
+      - name: Verify, publish, and prune releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+          DUMP_DATE: ${{ needs.prepare.outputs.dump_date }}
+          AOZORA_COMMIT: ${{ needs.prepare.outputs.aozora_commit }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/assets.json"
+          PYTHONPATH=src python -m japanese_corpus verify-assets \
+            --stats-dir "$RUNNER_TEMP/stats" \
+            --assets-json "$RUNNER_TEMP/assets.json"
+
+          PYTHONPATH=src python -m japanese_corpus build-manifest \
+            --stats-dir "$RUNNER_TEMP/stats" \
+            --discovery "$RUNNER_TEMP/discovery/discovery.json" \
+            --output "$RUNNER_TEMP/manifest.json" \
+            --checksums "$RUNNER_TEMP/SHA256SUMS" \
+            --version "$RELEASE_TAG" \
+            --pipeline-commit "$GITHUB_SHA"
+
+          RECORDS=$(jq -r '.totals.records' "$RUNNER_TEMP/manifest.json")
+          CHARACTERS=$(jq -r '.totals.characters' "$RUNNER_TEMP/manifest.json")
+          AOZORA_SHORT=${AOZORA_COMMIT:0:12}
+          {
+            echo "Automated Japanese corpus release."
+            echo
+            echo "- Japanese Wikipedia dump: $DUMP_DATE"
+            echo "- Aozora Bunko repository commit: $AOZORA_SHORT"
+            echo "- Documents: $RECORDS"
+            echo "- Characters: $CHARACTERS"
+            echo
+            echo "See manifest.json, SHA256SUMS, and NOTICE.md for provenance and verification."
+          } > "$RUNNER_TEMP/release-notes.md"
+
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/manifest.json" \
+            "$RUNNER_TEMP/SHA256SUMS" \
+            NOTICE.md \
+            LICENSE-DATA.md \
+            schema/corpus-record.schema.json \
+            schema/release-manifest.schema.json
+          gh release edit "$RELEASE_TAG" \
+            --draft=false \
+            --latest \
+            --title "JapaneseCorpus $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+
+          while IFS= read -r OLD_TAG; do
+            if [[ -n "$OLD_TAG" && "$OLD_TAG" != "$RELEASE_TAG" ]]; then
+              gh release delete "$OLD_TAG" --cleanup-tag --yes
+            fi
+          done < <(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | select(.draft == false) | .tag_name')
+
+          RELEASES="$RUNNER_TEMP/releases.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RELEASES"
+          COUNT=$(jq '[.[] | select(.draft == false)] | length' "$RELEASES")
+          ONLY_TAG=$(jq -r '[.[] | select(.draft == false)][0].tag_name // ""' "$RELEASES")
+          if [[ "$COUNT" != "1" || "$ONLY_TAG" != "$RELEASE_TAG" ]]; then
+            echo "Expected one published release ($RELEASE_TAG), found $COUNT ($ONLY_TAG)." >&2
+            exit 1
+          fi

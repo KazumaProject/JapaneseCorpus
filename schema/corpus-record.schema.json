@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/corpus-record.schema.json",
+  "title": "JapaneseCorpus record",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source",
+    "document_id",
+    "title",
+    "url",
+    "text",
+    "metadata"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source": { "enum": ["wikipedia", "aozora_bunko"] },
+    "document_id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "url": { "type": "string", "format": "uri" },
+    "text": { "type": "string", "minLength": 1 },
+    "metadata": { "type": "object" },
+    "annotations": {
+      "type": "object",
+      "properties": {
+        "ruby": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["start", "end", "reading"],
+            "properties": {
+              "start": { "type": "integer", "minimum": 0 },
+              "end": { "type": "integer", "minimum": 1 },
+              "reading": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
