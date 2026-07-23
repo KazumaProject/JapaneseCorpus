@@ -198,6 +198,48 @@ class ManifestTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            ajimee_report_path = directory / "ajimee-bench-report.json"
+            write_json(
+                ajimee_report_path,
+                {
+                    "schema_version": 1,
+                    "benchmark": {
+                        "name": "AJIMEE-Bench",
+                        "dataset": "JWTD_v2/v1/evaluation_items.json",
+                        "repository_url": "https://github.com/azooKey/AJIMEE-Bench",
+                        "commit": "f" * 40,
+                        "sha256": "e" * 64,
+                        "license": "CC-BY-SA-3.0",
+                        "items": 200,
+                    },
+                    "engine": {
+                        "candidate_limit": 1,
+                        "context_mode": "ignored",
+                        "dictionary_entries": 24,
+                    },
+                    "metrics": {
+                        "overall": {
+                            "items": 200,
+                            "correct_at_1": 107,
+                            "accuracy_at_1": 0.535,
+                            "mean_min_cer": 0.0715,
+                        },
+                        "with_context": {
+                            "items": 100,
+                            "correct_at_1": 44,
+                            "accuracy_at_1": 0.44,
+                            "mean_min_cer": 0.0991,
+                        },
+                        "without_context": {
+                            "items": 100,
+                            "correct_at_1": 63,
+                            "accuracy_at_1": 0.63,
+                            "mean_min_cer": 0.0439,
+                        },
+                    },
+                },
+            )
+
             manifest = build_manifest(
                 stats_directory,
                 discovery,
@@ -210,6 +252,7 @@ class ManifestTest(unittest.TestCase):
                 dictionary_sums_path,
                 english_manifest_path,
                 english_sums_path,
+                ajimee_report_path,
             )
 
             self.assertEqual(manifest["totals"]["dictionary_entries"], 15)
@@ -230,6 +273,13 @@ class ManifestTest(unittest.TestCase):
             )
             self.assertEqual(manifest["sources"]["jmdict"]["created"], "2026-07-22")
             self.assertIn("mozc-english-unigram-00000.txt.zst", checksums)
+            self.assertEqual(
+                manifest["benchmarks"]["ajimee"]["metrics"]["overall"][
+                    "correct_at_1"
+                ],
+                107,
+            )
+            self.assertIn("ajimee-bench-report.json", checksums)
 
 
 if __name__ == "__main__":

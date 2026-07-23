@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--dictionary-checksums", type=Path)
     manifest.add_argument("--english-dictionary-manifest", type=Path)
     manifest.add_argument("--english-dictionary-checksums", type=Path)
+    manifest.add_argument("--ajimee-report", type=Path)
 
     verify = subparsers.add_parser(
         "verify-assets", help="Verify uploaded Release asset names and sizes"
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> None:
             dictionary_checksums_path=args.dictionary_checksums,
             english_dictionary_manifest_path=args.english_dictionary_manifest,
             english_dictionary_checksums_path=args.english_dictionary_checksums,
+            ajimee_report_path=args.ajimee_report,
         )
     elif args.command == "verify-assets":
         verify_remote_assets(args.stats_dir, args.assets_json)

@@ -60,6 +60,20 @@ English language-source forms from katakana-reading JMdict entries. Each
 Release includes the exact source snapshot, its SHA-256 in the English
 dictionary manifest, and a saved copy of the EDRDG licence page.
 
+## AJIMEE-Bench
+
+- Project: <https://github.com/azooKey/AJIMEE-Bench>
+- Pinned commit: `401666cd56d1a570c2021798b64b6da4396bfd45`
+- Dataset: `JWTD_v2/v1/evaluation_items.json`
+- Dataset SHA-256: `e9eb668fd6aa14b1e26436f429b5550108af0a1dfd443b8cea0bcb3ab3028fca`
+- Dataset licence: CC BY-SA 3.0
+- Evaluation implementation licence: CC0 1.0
+
+The pinned dataset is downloaded and checksum-verified during CI and Release
+builds, but is not redistributed by JapaneseCorpus. A Release contains only an
+aggregate report with Accuracy@1 and MinCER values, source provenance, and no
+benchmark prompts or expected outputs.
+
 ## Pipeline code
 
 The source code and configuration in this repository are licensed under the

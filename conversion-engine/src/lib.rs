@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use unicode_normalization::UnicodeNormalization;
 
+pub mod ajimee;
+
 /// Cost assigned to one input character that is not covered by the dictionary.
 pub const DEFAULT_UNKNOWN_COST: i64 = 50_000;
 

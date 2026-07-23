@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  AJIMEE_COMMIT: 401666cd56d1a570c2021798b64b6da4396bfd45
+  AJIMEE_DATA_SHA256: e9eb668fd6aa14b1e26436f429b5550108af0a1dfd443b8cea0bcb3ab3028fca
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,6 +33,7 @@ jobs:
           python -m json.tool schema/release-manifest.schema.json >/dev/null
           python -m json.tool schema/ngram-manifest.schema.json >/dev/null
           python -m json.tool schema/english-dictionary-manifest.schema.json >/dev/null
+          python -m json.tool schema/ajimee-bench-report.schema.json >/dev/null
           PYTHONPATH=src python -m japanese_corpus --help >/dev/null
       - name: Test n-gram dictionary builder
         run: |
@@ -90,7 +95,7 @@ jobs:
           jq -e '.orders | length == 3 and all(.retained_entries > 0)' \
             "$INTEGRATION/output/ngram-manifest.json" >/dev/null
           CONVERTED=$(cargo run --quiet --locked \
-            --manifest-path conversion-engine/Cargo.toml -- \
+            --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
             --dictionary "$INTEGRATION/output" \
             わたしはがっこうへいく)
           grep -q '私' <<<"$CONVERTED"
@@ -112,8 +117,28 @@ jobs:
           jq -e '.counts.retained_entries == 9' \
             "$INTEGRATION/english-output/english-dictionary-manifest.json" >/dev/null
           ENGLISH_CONVERTED=$(cargo run --quiet --locked \
-            --manifest-path conversion-engine/Cargo.toml -- \
+            --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
             --dictionary "$INTEGRATION/english-output" \
             --candidates 5 \
             こんぴゅーた)
           grep -q $'\tcomputer$' <<<"$ENGLISH_CONVERTED"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$INTEGRATION/ajimee-evaluation-items.json" \
+            "https://raw.githubusercontent.com/azooKey/AJIMEE-Bench/$AJIMEE_COMMIT/JWTD_v2/v1/evaluation_items.json"
+          echo "$AJIMEE_DATA_SHA256  $INTEGRATION/ajimee-evaluation-items.json" | sha256sum --check
+          cargo run --quiet --locked \
+            --manifest-path conversion-engine/Cargo.toml --bin ajimee-bench -- \
+            --dictionary "$INTEGRATION/output" \
+            --dictionary "$INTEGRATION/english-output" \
+            --dataset "$INTEGRATION/ajimee-evaluation-items.json" \
+            --output "$INTEGRATION/ajimee-bench-report.json" \
+            --benchmark-commit "$AJIMEE_COMMIT"
+          jq -e '
+            .benchmark.items == 200 and
+            .benchmark.sha256 == env.AJIMEE_DATA_SHA256 and
+            .engine.context_mode == "ignored" and
+            .metrics.overall.items == 200 and
+            .metrics.with_context.items == 100 and
+            .metrics.without_context.items == 100
+          ' "$INTEGRATION/ajimee-bench-report.json" >/dev/null

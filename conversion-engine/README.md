@@ -53,3 +53,23 @@ The crate also exposes `Dictionary`, `Converter`, `Candidate`, and `Segment`.
 ranked candidates and their segment boundaries. The generated dictionary costs
 already encode corpus frequency; no external Mozc runtime or connection matrix
 is required by this engine.
+
+## AJIMEE-Bench
+
+The `ajimee-bench` binary evaluates the top candidate on all 200 pinned
+AJIMEE-Bench items. It implements exact-match Accuracy@1 and the minimum
+character error rate over accepted references, then writes an aggregate JSON
+report. No evaluation text is copied into the report.
+
+```console
+cargo run --release --locked \
+  --manifest-path conversion-engine/Cargo.toml --bin ajimee-bench -- \
+  -d path/to/dictionary \
+  --dataset path/to/evaluation_items.json \
+  --output ajimee-bench-report.json \
+  --benchmark-commit 401666cd56d1a570c2021798b64b6da4396bfd45
+```
+
+The converter does not currently accept AJIMEE's left context. Reports state
+`context_mode: "ignored"` and expose separate metrics for the 100 contextual
+and 100 context-free items rather than implying that context was consumed.

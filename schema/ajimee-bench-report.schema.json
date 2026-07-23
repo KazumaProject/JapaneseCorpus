@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/ajimee-bench-report.schema.json",
+  "title": "JapaneseCorpus AJIMEE-Bench aggregate report",
+  "type": "object",
+  "required": ["schema_version", "benchmark", "engine", "metrics"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "benchmark": {
+      "type": "object",
+      "required": [
+        "name",
+        "dataset",
+        "repository_url",
+        "commit",
+        "sha256",
+        "license",
+        "items"
+      ],
+      "properties": {
+        "name": { "const": "AJIMEE-Bench" },
+        "items": { "const": 200 }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "required": ["candidate_limit", "context_mode", "dictionary_entries"],
+      "properties": {
+        "candidate_limit": { "const": 1 },
+        "context_mode": { "enum": ["ignored"] },
+        "dictionary_entries": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["overall", "with_context", "without_context"],
+      "properties": {
+        "overall": { "$ref": "#/$defs/metricSet" },
+        "with_context": { "$ref": "#/$defs/metricSet" },
+        "without_context": { "$ref": "#/$defs/metricSet" }
+      }
+    }
+  },
+  "$defs": {
+    "metricSet": {
+      "type": "object",
+      "required": ["items", "correct_at_1", "accuracy_at_1", "mean_min_cer"],
+      "properties": {
+        "items": { "type": "integer", "minimum": 0 },
+        "correct_at_1": { "type": "integer", "minimum": 0 },
+        "accuracy_at_1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mean_min_cer": { "type": "number", "minimum": 0 }
+      }
+    }
+  },
+  "additionalProperties": false
+}

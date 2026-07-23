@@ -58,6 +58,13 @@
         "assets",
         "metadata_assets"
       ]
+    },
+    "benchmarks": {
+      "type": "object",
+      "required": ["ajimee"],
+      "properties": {
+        "ajimee": { "$ref": "ajimee-bench-report.schema.json" }
+      }
     }
   },
   "additionalProperties": true

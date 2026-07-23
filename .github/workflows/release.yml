@@ -34,6 +34,8 @@ env:
   MOZC_ID_DEF_SHA256: 07a05a268c3783b7e02b36e4aa591555a2dd19a1f3c93891576740761c154f2d
   VIBRATO_IPADIC_VERSION: v0.5.0-ipadic-mecab-2_7_0
   VIBRATO_IPADIC_ARCHIVE_SHA256: 4764f983b7c3a9e1cb6a5ee945e00558efd812980e0dad61224f63ee3b0475d9
+  AJIMEE_COMMIT: 401666cd56d1a570c2021798b64b6da4396bfd45
+  AJIMEE_DATA_SHA256: e9eb668fd6aa14b1e26436f429b5550108af0a1dfd443b8cea0bcb3ab3028fca
 
 jobs:
   prepare:
@@ -210,7 +212,7 @@ jobs:
           retention-days: 1
 
   dictionary:
-    needs: [prepare, wikipedia, aozora]
+    needs: [prepare, wikipedia, aozora, english-dictionary]
     if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -218,6 +220,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Download English dictionary for combined evaluation
+        uses: actions/download-artifact@v4
+        with:
+          name: english-dictionary-metadata
+          path: ${{ runner.temp }}/english
       - name: Install build dependencies
         run: |
           set -euo pipefail
@@ -293,6 +300,23 @@ jobs:
             --mozc-commit "$MOZC_COMMIT" \
             --vibrato-dictionary-version "$VIBRATO_IPADIC_VERSION" \
             --pipeline-commit "$GITHUB_SHA"
+      - name: Evaluate conversion accuracy with pinned AJIMEE-Bench
+        run: |
+          set -euo pipefail
+          DATASET="$RUNNER_TEMP/ajimee-evaluation-items.json"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$DATASET" \
+            "https://raw.githubusercontent.com/azooKey/AJIMEE-Bench/$AJIMEE_COMMIT/JWTD_v2/v1/evaluation_items.json"
+          echo "$AJIMEE_DATA_SHA256  $DATASET" | sha256sum --check
+          cargo run --quiet --release --locked \
+            --manifest-path conversion-engine/Cargo.toml --bin ajimee-bench -- \
+            --dictionary "$RUNNER_TEMP/ngram-output" \
+            --dictionary "$RUNNER_TEMP/english" \
+            --dataset "$DATASET" \
+            --output "$RUNNER_TEMP/ngram-output/ajimee-bench-report.json" \
+            --benchmark-commit "$AJIMEE_COMMIT" \
+            --minimum-accuracy-at-1 0.50 \
+            --maximum-mean-min-cer 0.09
       - name: Validate and upload dictionary assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -340,6 +364,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ngram-output/ngram-manifest.json
             ${{ runner.temp }}/ngram-output/NGRAM-SHA256SUMS
+            ${{ runner.temp }}/ngram-output/ajimee-bench-report.json
           retention-days: 1
 
   english-dictionary:
@@ -416,10 +441,10 @@ jobs:
           (cd "$OUTPUT" && sha256sum --check ENGLISH-DICTIONARY-SHA256SUMS)
 
           COMPUTER=$(cargo run --quiet --release --locked \
-            --manifest-path conversion-engine/Cargo.toml -- \
+            --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
             --dictionary "$OUTPUT" --candidates 10 こんぴゅーた)
           ART=$(cargo run --quiet --release --locked \
-            --manifest-path conversion-engine/Cargo.toml -- \
+            --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
             --dictionary "$OUTPUT" --candidates 10 あーと)
           grep -q $'\tcomputer$' <<<"$COMPUTER"
           grep -q $'\tart$' <<<"$ART"
@@ -450,6 +475,7 @@ jobs:
           path: |
             ${{ runner.temp }}/english-output/english-dictionary-manifest.json
             ${{ runner.temp }}/english-output/ENGLISH-DICTIONARY-SHA256SUMS
+            ${{ runner.temp }}/english-output/mozc-english-unigram-*.txt.zst
           retention-days: 1
 
   finalize:
@@ -507,7 +533,8 @@ jobs:
             --dictionary-manifest "$RUNNER_TEMP/ngram/ngram-manifest.json" \
             --dictionary-checksums "$RUNNER_TEMP/ngram/NGRAM-SHA256SUMS" \
             --english-dictionary-manifest "$RUNNER_TEMP/english/english-dictionary-manifest.json" \
-            --english-dictionary-checksums "$RUNNER_TEMP/english/ENGLISH-DICTIONARY-SHA256SUMS"
+            --english-dictionary-checksums "$RUNNER_TEMP/english/ENGLISH-DICTIONARY-SHA256SUMS" \
+            --ajimee-report "$RUNNER_TEMP/ngram/ajimee-bench-report.json"
 
           RECORDS=$(jq -r '.totals.records' "$RUNNER_TEMP/manifest.json")
           CHARACTERS=$(jq -r '.totals.characters' "$RUNNER_TEMP/manifest.json")
@@ -516,6 +543,8 @@ jobs:
           TRIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 3) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           ENGLISH_ENTRIES=$(jq -r '.english_dictionary.counts.retained_entries' "$RUNNER_TEMP/manifest.json")
           JMDICT_CREATED=$(jq -r '.sources.jmdict.created' "$RUNNER_TEMP/manifest.json")
+          AJIMEE_ACCURACY=$(jq -r '.benchmarks.ajimee.metrics.overall.accuracy_at_1' "$RUNNER_TEMP/manifest.json")
+          AJIMEE_MINCER=$(jq -r '.benchmarks.ajimee.metrics.overall.mean_min_cer' "$RUNNER_TEMP/manifest.json")
           AOZORA_SHORT=${AOZORA_COMMIT:0:12}
           {
             echo "Automated Japanese corpus release."
@@ -529,6 +558,8 @@ jobs:
             echo "- Mozc trigram entries: $TRIGRAMS"
             echo "- JMdict source date: $JMDICT_CREATED"
             echo "- Hiragana-to-English entries: $ENGLISH_ENTRIES"
+            echo "- AJIMEE-Bench Accuracy@1: $AJIMEE_ACCURACY"
+            echo "- AJIMEE-Bench mean MinCER: $AJIMEE_MINCER"
             echo
             echo "See manifest.json, SHA256SUMS, the dictionary manifests, and NOTICE.md for provenance and verification."
           } > "$RUNNER_TEMP/release-notes.md"
@@ -541,7 +572,8 @@ jobs:
             schema/corpus-record.schema.json \
             schema/release-manifest.schema.json \
             schema/ngram-manifest.schema.json \
-            schema/english-dictionary-manifest.schema.json
+            schema/english-dictionary-manifest.schema.json \
+            schema/ajimee-bench-report.schema.json
           gh release edit "$RELEASE_TAG" \
             --draft=false \
             --latest \

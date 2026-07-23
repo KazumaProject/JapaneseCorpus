@@ -41,6 +41,7 @@ def build_manifest(
     dictionary_checksums_path: Path | None = None,
     english_dictionary_manifest_path: Path | None = None,
     english_dictionary_checksums_path: Path | None = None,
+    ajimee_report_path: Path | None = None,
 ) -> dict[str, Any]:
     stats = load_stats(stats_directory)
     with discovery_path.open(encoding="utf-8") as stream:
@@ -103,6 +104,15 @@ def build_manifest(
                 english_dictionary_manifest_path,
                 english_dictionary_checksums_path,
             )
+        )
+
+    ajimee_report = None
+    ajimee_checksum_entry: tuple[str, str] | None = None
+    if ajimee_report_path is not None:
+        ajimee_report = load_ajimee_report(ajimee_report_path)
+        ajimee_checksum_entry = (
+            _sha256(ajimee_report_path),
+            "ajimee-bench-report.json",
         )
 
     manifest = {
@@ -179,6 +189,11 @@ def build_manifest(
             if english_dictionary is not None
             else {}
         ),
+        **(
+            {"benchmarks": {"ajimee": ajimee_report}}
+            if ajimee_report is not None
+            else {}
+        ),
     }
     write_json(output_path, manifest)
     with checksums_path.open("w", encoding="utf-8", newline="\n") as stream:
@@ -187,6 +202,9 @@ def build_manifest(
         for digest, name in dictionary_checksum_entries:
             stream.write(f"{digest}  {name}\n")
         for digest, name in english_checksum_entries:
+            stream.write(f"{digest}  {name}\n")
+        if ajimee_checksum_entry is not None:
+            digest, name = ajimee_checksum_entry
             stream.write(f"{digest}  {name}\n")
     return manifest
 
@@ -335,6 +353,68 @@ def load_english_dictionary_metadata(
     )
     dictionary["metadata_assets"] = [manifest_name, checksums_name]
     return dictionary, entries
+
+
+def load_ajimee_report(report_path: Path) -> dict[str, Any]:
+    with report_path.open(encoding="utf-8") as stream:
+        report = json.load(stream)
+    required = {"schema_version", "benchmark", "engine", "metrics"}
+    missing = required - report.keys()
+    if missing:
+        raise RuntimeError(f"AJIMEE-Bench report is missing fields: {sorted(missing)}")
+    if report["schema_version"] != 1:
+        raise RuntimeError("Unsupported AJIMEE-Bench report schema")
+    if report["benchmark"].get("name") != "AJIMEE-Bench":
+        raise RuntimeError("Unexpected AJIMEE-Bench report name")
+    required_benchmark = {
+        "name",
+        "dataset",
+        "repository_url",
+        "commit",
+        "sha256",
+        "license",
+        "items",
+    }
+    missing_benchmark = required_benchmark - report["benchmark"].keys()
+    if missing_benchmark:
+        raise RuntimeError(
+            "AJIMEE-Bench provenance is missing fields: "
+            f"{sorted(missing_benchmark)}"
+        )
+    if report["benchmark"].get("items") != 200:
+        raise RuntimeError("AJIMEE-Bench report must contain all 200 items")
+    if report["engine"].get("candidate_limit") != 1:
+        raise RuntimeError("AJIMEE-Bench report must evaluate the first candidate")
+    if report["engine"].get("context_mode") != "ignored":
+        raise RuntimeError("Unexpected AJIMEE-Bench context mode")
+    for group in ("overall", "with_context", "without_context"):
+        metrics = report["metrics"].get(group, {})
+        missing_metrics = {
+            "items",
+            "correct_at_1",
+            "accuracy_at_1",
+            "mean_min_cer",
+        } - metrics.keys()
+        if missing_metrics:
+            raise RuntimeError(
+                f"AJIMEE-Bench {group} metrics are missing fields: "
+                f"{sorted(missing_metrics)}"
+            )
+        items = int(metrics["items"])
+        correct = int(metrics["correct_at_1"])
+        accuracy = float(metrics["accuracy_at_1"])
+        mean_min_cer = float(metrics["mean_min_cer"])
+        if not 0 <= correct <= items:
+            raise RuntimeError(f"Invalid AJIMEE-Bench {group} correct count")
+        if not 0.0 <= accuracy <= 1.0 or mean_min_cer < 0.0:
+            raise RuntimeError(f"Invalid AJIMEE-Bench {group} metric value")
+    if report["metrics"]["overall"]["items"] != 200:
+        raise RuntimeError("AJIMEE-Bench overall metrics must contain 200 items")
+    if report["metrics"]["with_context"]["items"] != 100:
+        raise RuntimeError("AJIMEE-Bench contextual metrics must contain 100 items")
+    if report["metrics"]["without_context"]["items"] != 100:
+        raise RuntimeError("AJIMEE-Bench context-free metrics must contain 100 items")
+    return report
 
 
 def verify_remote_assets(stats_directory: Path, assets_json: Path) -> None:

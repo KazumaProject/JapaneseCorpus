@@ -28,3 +28,8 @@ same CC BY-SA 4.0 terms. The exact source snapshot and the EDRDG licence page
 are included in each Release as `JMdict_e-<date>.xml.gz` and
 `JMDICT-LICENSE.html`. This project does not claim copyright over JMdict
 material.
+
+The AJIMEE-Bench evaluation dataset is not included in JapaneseCorpus
+Releases. Its aggregate accuracy report contains provenance and factual metric
+values only; the upstream dataset remains subject to its CC BY-SA 3.0 terms as
+described in `NOTICE.md`.

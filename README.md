@@ -26,6 +26,7 @@
 - `mozc-english-unigram-<part>.txt.zst`: ひらがな読みから英語候補への辞書
 - `english-dictionary-manifest.json` / `ENGLISH-DICTIONARY-SHA256SUMS`: 日英辞書の出典、件数、検証値
 - `JMdict_e-<date>.xml.gz` / `JMDICT-LICENSE.html`: 使用したJMdict原本とライセンス
+- `ajimee-bench-report.json`: AJIMEE-BenchによるAccuracy@1／MinCER評価
 
 展開例:
 
@@ -135,6 +136,30 @@ conversion-engine/target/release/kana-kanji-converter \
 継続利用できます。詳しくは[`conversion-engine/README.md`](conversion-engine/README.md)
 を参照してください。
 
+## Conversion accuracy
+
+[AJIMEE-Bench](https://github.com/azooKey/AJIMEE-Bench)の
+`JWTD_v2/v1/evaluation_items.json`全200件を、公式定義と同じ完全一致の
+Accuracy@1および許容正解候補に対する最小文字誤り率（MinCER）で評価します。
+データはcommit `401666cd56d1a570c2021798b64b6da4396bfd45`とSHA-256を固定し、
+各Releaseに集計レポートを含めます。評価データ本体は再配布しません。
+
+現在の変換APIは左文脈を受け取らないため、AJIMEE-Benchの`context_text`は変換に
+使用せず、レポートの`context_mode`を`ignored`としています。その状態を隠さず、
+全体に加えて文脈あり100件／なし100件の結果を別々に出力します。Release生成時は
+Accuracy@1 0.50以上、平均MinCER 0.09以下を必須とし、精度回帰を検出します。
+
+既存の辞書を手元で評価する例:
+
+```console
+cargo run --release --locked \
+  --manifest-path conversion-engine/Cargo.toml --bin ajimee-bench -- \
+  --dictionary path/to/extracted-release \
+  --dataset path/to/AJIMEE-Bench/JWTD_v2/v1/evaluation_items.json \
+  --output ajimee-bench-report.json \
+  --benchmark-commit 401666cd56d1a570c2021798b64b6da4396bfd45
+```
+
 個別のWikipediaシャード生成:
 
 ```console
@@ -147,7 +172,7 @@ PYTHONPATH=src python3 -m japanese_corpus build-wikipedia \
 
 GitHub Actionsは毎週月曜03:17 UTCに最新ソースを確認します。Wikipediaの各
 シャードを並列処理した後、全コーパスから1/2/3-gram辞書を生成し、完成した
-draft Releaseを検証してから公開します。
+辞書をAJIMEE-Benchで評価してから、完成したdraft Releaseを検証して公開します。
 公開後に以前のReleaseとタグを削除するため、未完成ビルドが現在の配布を壊す
 ことはありません。同一ソース・同一生成コードなら定期実行はスキップします。
 
