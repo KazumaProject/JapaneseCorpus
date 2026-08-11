@@ -27,6 +27,9 @@
 - `english-dictionary-manifest.json` / `ENGLISH-DICTIONARY-SHA256SUMS`: 日英辞書の出典、件数、検証値
 - `JMdict_e-<date>.xml.gz` / `JMDICT-LICENSE.html`: 使用したJMdict原本とライセンス
 - `ajimee-bench-report.json`: AJIMEE-BenchによるAccuracy@1／MinCER評価
+- `homophone-groups.jsonl.zst`: 読みごとの同音語グループと候補別頻度
+- `homophone-occurrences.jsonl.zst`: 同音語の出現文、前後文脈、形態素情報
+- `homophone-manifest.json` / `HOMOPHONE-SHA256SUMS`: 同音語コーパスの条件と検証値
 
 展開例:
 
@@ -103,10 +106,39 @@ EDRDGが日次配布する英語版JMdictから、カタカナだけで構成さ
 同じ読みの複数候補を残すため、一般語の`art`と略語の`ART`は別行です。
 入力に使ったJMdict原本、SHA-256、ETag、生成日、ライセンスをReleaseへ同梱します。
 
+## Homophone context corpus
+
+同音異義語用の派生コーパスは、既存のWikipedia／青空文庫JSONLをSudachiPyで
+解析し、同じ正規化読みから2種類以上の異なる表記が実際に出現したグループだけを
+抽出します。表記ごとの頻度、原形、品詞、出典別件数を保持し、出現例には文、
+Unicodeコードポイント単位の文書内オフセット、前後文脈を保存します。
+かな漢字変換用のノイズを抑えるため、候補表記は漢字を1文字以上含むものに限定し、
+青空文庫ではトークン範囲と一致するルビをSudachiの読みより優先します。
+
+生成には追加依存のSudachiPyとSudachiDict-coreが必要です。
+
+```console
+python3 -m pip install -e '.[homophones]'
+PYTHONPATH=src python3 -m japanese_corpus build-homophones \
+  --input work/benchmark/base-corpus/wikipedia-20260719-00000.jsonl.zst \
+  --input work/benchmark/base-corpus/aozora-b2b3dac2e450.jsonl.zst \
+  --output-dir work/homophone-corpus \
+  --pipeline-commit "$(git rev-parse HEAD)"
+```
+
+開発時は`--limit-documents 1000`で先頭の文書だけを処理できます。頻度で候補を
+削らず、既定値の`--min-candidate-count 1`では1回だけ出現する語も残します。
+候補を高頻度語に限定する場合だけ、この閾値を上げてください。
+
+グループと出現例のスキーマは、それぞれ
+`schema/homophone-group.schema.json`と`schema/homophone-occurrence.schema.json`、
+生成条件は`schema/homophone-manifest.schema.json`で定義します。
+
 ## Development
 
-Python 3.11以上、Git、`zstd` が必要です。ランタイムのPython外部依存は
-ありません。
+Python 3.11以上、Git、`zstd` が必要です。通常のコーパス生成にはランタイムの
+Python外部依存はありません。同音語コーパス生成だけは、上記の
+`homophones`追加依存を使用します。
 
 ```console
 PYTHONPATH=src python3 -m unittest discover -s tests -v

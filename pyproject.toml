@@ -11,6 +11,12 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "KazumaProject" }]
 
+[project.optional-dependencies]
+homophones = [
+    "SudachiPy>=0.6.8",
+    "SudachiDict-core>=20240109",
+]
+
 [project.scripts]
 japanese-corpus = "japanese_corpus.cli:main"
 

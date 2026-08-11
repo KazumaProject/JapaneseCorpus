@@ -12,6 +12,7 @@ from .discover import (
     WIKIMEDIA_ROOT,
     discover_sources,
 )
+from .homophones import build_homophones
 from .manifest import build_manifest, verify_remote_assets
 from .wikipedia import build_wikipedia
 
@@ -46,6 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
     aozora.add_argument("--stats", type=Path, required=True)
     aozora.add_argument("--source-commit", required=True)
     aozora.add_argument("--limit", type=int, default=0)
+
+    homophones = subparsers.add_parser(
+        "build-homophones",
+        help="Build a context corpus of attested homophone groups",
+    )
+    homophones.add_argument("--input", type=Path, action="append", required=True)
+    homophones.add_argument("--output-dir", type=Path, required=True)
+    homophones.add_argument("--min-group-size", type=int, default=2)
+    homophones.add_argument("--min-candidate-count", type=int, default=1)
+    homophones.add_argument("--dictionary-version", default="SudachiDict")
+    homophones.add_argument("--pipeline-commit", default="working-tree")
+    homophones.add_argument("--limit-documents", type=int, default=0)
 
     paths = subparsers.add_parser(
         "list-aozora-paths", help="List public-domain source ZIP paths"
@@ -105,6 +118,16 @@ def main(argv: list[str] | None = None) -> None:
             stats_path=args.stats,
             source_commit=args.source_commit,
             limit=args.limit,
+        )
+    elif args.command == "build-homophones":
+        build_homophones(
+            input_paths=args.input,
+            output_dir=args.output_dir,
+            min_group_size=args.min_group_size,
+            min_candidate_count=args.min_candidate_count,
+            dictionary_version=args.dictionary_version,
+            pipeline_commit=args.pipeline_commit,
+            limit_documents=args.limit_documents,
         )
     elif args.command == "list-aozora-paths":
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/homophone-manifest.schema.json",
+  "title": "JapaneseCorpus homophone corpus manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "format",
+    "selection",
+    "tokenizer",
+    "corpus",
+    "assets"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "format": { "type": "object" },
+    "selection": { "type": "object" },
+    "tokenizer": { "type": "object" },
+    "corpus": {
+      "type": "object",
+      "required": [
+        "input_assets",
+        "documents",
+        "sentences",
+        "valid_tokens",
+        "homophone_groups",
+        "candidate_forms",
+        "occurrences",
+        "pipeline_commit"
+      ],
+      "properties": {
+        "input_assets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "bytes", "sha256"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "bytes": { "type": "integer", "minimum": 0 },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "documents": { "type": "integer", "minimum": 0 },
+        "sentences": { "type": "integer", "minimum": 0 },
+        "valid_tokens": { "type": "integer", "minimum": 0 },
+        "reading_source_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "homophone_groups": { "type": "integer", "minimum": 0 },
+        "candidate_forms": { "type": "integer", "minimum": 0 },
+        "occurrences": { "type": "integer", "minimum": 0 },
+        "pipeline_commit": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["name", "records", "bytes", "sha256"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "records": { "type": "integer", "minimum": 0 },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

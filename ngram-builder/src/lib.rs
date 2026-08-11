@@ -1,3 +1,4 @@
+mod homophone;
 mod output;
 mod tokenizer;
 
@@ -13,6 +14,8 @@ use vibrato::{Dictionary, Tokenizer};
 
 use output::{write_release_files, BuildManifestInput, OrderCounts, ThirdPartyFiles};
 use tokenizer::{split_sentences, MozcIdMap, TokenKey, TokenSequenceBuilder};
+
+pub use homophone::{build_homophones, HomophoneBuildOptions};
 
 const MISSING_VOCAB_ID: u32 = u32::MAX;
 const TOKENIZE_BATCH_CHARACTERS: usize = 4 * 1024 * 1024;
