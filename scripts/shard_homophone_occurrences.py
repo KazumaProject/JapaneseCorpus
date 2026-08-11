@@ -97,6 +97,10 @@ def main() -> None:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--records-per-shard", type=int, default=5_000_000)
+    parser.add_argument(
+        "--pipeline-commit",
+        help="replace corpus.pipeline_commit in the packaged manifest",
+    )
     args = parser.parse_args()
     if args.records_per_shard < 1:
         parser.error("--records-per-shard must be positive")
@@ -128,6 +132,8 @@ def main() -> None:
     assets = [asset_metadata(groups_path, int(manifest["corpus"]["homophone_groups"]))]
     assets.extend(occurrence_assets)
     manifest["corpus"]["occurrence_shard_records"] = args.records_per_shard
+    if args.pipeline_commit:
+        manifest["corpus"]["pipeline_commit"] = args.pipeline_commit
     manifest["assets"] = assets
     (args.output_dir / MANIFEST_ASSET).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
