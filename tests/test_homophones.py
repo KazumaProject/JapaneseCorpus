@@ -35,7 +35,10 @@ class HomophoneCorpusTest(unittest.TestCase):
                         "document_id": "1",
                         "title": "同音語",
                         "url": "https://example.test/1",
-                        "text": "両国は交渉を続けた。高尚な話を聞いた。",
+                        "text": (
+                            "両国は交渉を続けた。高尚な話を聞いた。"
+                            "交渉は難航し、高尚な理念が必要だ。"
+                        ),
                         "metadata": {},
                     },
                     ensure_ascii=False,
@@ -59,9 +62,9 @@ class HomophoneCorpusTest(unittest.TestCase):
             {candidate["surface"] for candidate in group["candidates"]},
             {"交渉", "高尚"},
         )
-        self.assertEqual(group["total_occurrences"], 2)
-        self.assertEqual(manifest["corpus"]["occurrences"], 2)
-        self.assertEqual(len(occurrences), 2)
+        self.assertEqual(group["total_occurrences"], 4)
+        self.assertEqual(manifest["corpus"]["occurrences"], 4)
+        self.assertEqual(len(occurrences), 4)
         for occurrence in occurrences:
             self.assertEqual(
                 occurrence["sentence"][
@@ -97,7 +100,7 @@ class HomophoneCorpusTest(unittest.TestCase):
                         "document_id": "ruby",
                         "title": "ルビ",
                         "url": "https://example.test/ruby",
-                        "text": "山。三。",
+                        "text": "山。産。",
                         "metadata": {"orthography": "新字新仮名"},
                         "annotations": {
                             "ruby": [{"start": 0, "end": 1, "reading": "さん"}]
@@ -108,7 +111,12 @@ class HomophoneCorpusTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            manifest = build_homophones([source], directory / "output")
+            manifest = build_homophones(
+                [source],
+                directory / "output",
+                min_natural_occurrences=1,
+                min_natural_sentences=1,
+            )
             occurrences = read_zstd_jsonl(
                 directory / "output" / "homophone-occurrences.jsonl.zst"
             )

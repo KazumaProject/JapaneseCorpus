@@ -32,7 +32,7 @@
     "group_id": { "type": "string", "minLength": 1 },
     "reading": { "type": "string", "minLength": 1 },
     "reading_source": {
-      "enum": ["sudachi", "aozora_ruby"]
+      "enum": ["sudachi", "aozora_ruby", "vibrato"]
     },
     "surface": { "type": "string", "minLength": 1 },
     "lemma": { "type": "string", "minLength": 1 },

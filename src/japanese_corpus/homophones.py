@@ -20,6 +20,28 @@ MANIFEST_ASSET = "homophone-manifest.json"
 CHECKSUMS_ASSET = "HOMOPHONE-SHA256SUMS"
 SENTENCE_TERMINATORS = frozenset("。！？!?")
 MAX_TOKENIZER_CHUNK_CHARACTERS = 12_000
+NATURALNESS_POLICY_VERSION = "conservative-v1"
+DEFAULT_MIN_NATURAL_OCCURRENCES = 2
+DEFAULT_MIN_NATURAL_SENTENCES = 2
+MAX_NATURAL_SURFACE_CHARACTERS = 24
+MAX_NATURAL_READING_CHARACTERS = 24
+NATURAL_CONTENT_POS = frozenset(
+    {"名詞", "動詞", "形容詞", "形状詞", "副詞", "連体詞"}
+)
+NATURAL_NOISE_MARKERS = (
+    "http://",
+    "https://",
+    "www.",
+    "[[",
+    "]]",
+    "{{",
+    "}}",
+    "<ref",
+    "</ref>",
+    "ISBN",
+    "==",
+    "|",
+)
 
 
 @dataclass
@@ -33,6 +55,7 @@ class Token:
     start: int
     end: int
     reading_source: str = "sudachi"
+    is_oov: bool = False
 
 
 @dataclass
@@ -41,14 +64,35 @@ class CandidateStats:
     lemmas: Counter[str] = field(default_factory=Counter)
     parts_of_speech: Counter[str] = field(default_factory=Counter)
     sources: Counter[str] = field(default_factory=Counter)
+    reading_sources: Counter[str] = field(default_factory=Counter)
+    document_count: int = 0
+    sentence_count: int = 0
+    last_document_key: str = ""
+    last_sentence_id: str = ""
 
-    def observe(self, token: Token, source: str) -> None:
+    def observe(
+        self,
+        token: Token,
+        source: str,
+        document_id: str,
+        sentence_id: str,
+    ) -> None:
+        # _iter_records emits complete documents and sentences in source order,
+        # so distinct-evidence counts do not need per-candidate ID sets.
         self.count += 1
         self.lemmas[token.lemma] += 1
         self.parts_of_speech[
             "/".join((token.pos, token.subpos, token.subsubpos))
         ] += 1
         self.sources[source] += 1
+        self.reading_sources[token.reading_source] += 1
+        document_key = f"{source}\x1f{document_id}"
+        if document_key != self.last_document_key:
+            self.document_count += 1
+            self.last_document_key = document_key
+        if sentence_id != self.last_sentence_id:
+            self.sentence_count += 1
+            self.last_sentence_id = sentence_id
 
 
 @dataclass
@@ -56,7 +100,9 @@ class BuildCounters:
     documents: int = 0
     sentences: int = 0
     valid_tokens: int = 0
+    natural_candidate_tokens: int = 0
     reading_sources: Counter[str] = field(default_factory=Counter)
+    naturalness_rejections: Counter[str] = field(default_factory=Counter)
 
 
 def build_homophones(
@@ -68,12 +114,15 @@ def build_homophones(
     dictionary_version: str = "SudachiDict",
     pipeline_commit: str = "working-tree",
     limit_documents: int = 0,
+    min_natural_occurrences: int = DEFAULT_MIN_NATURAL_OCCURRENCES,
+    min_natural_sentences: int = DEFAULT_MIN_NATURAL_SENTENCES,
 ) -> dict[str, Any]:
-    """Build a context corpus containing only attested homophone groups.
+    """Build a curated context corpus containing natural homophone groups.
 
     The source corpus is read twice. The first pass creates an exact
-    reading-to-surface index; the second pass writes only occurrences whose
-    reading has at least min_group_size candidate surface forms.
+    reading-to-surface index after deterministic naturalness screening; the
+    second pass writes only occurrences whose reading has at least
+    min_group_size natural, independently attested candidate forms.
     """
 
     if not input_paths:
@@ -84,6 +133,10 @@ def build_homophones(
         raise ValueError("min_candidate_count must be positive")
     if limit_documents < 0:
         raise ValueError("limit_documents must not be negative")
+    if min_natural_occurrences < 1:
+        raise ValueError("min_natural_occurrences must be positive")
+    if min_natural_sentences < 1:
+        raise ValueError("min_natural_sentences must be positive")
 
     for input_path in input_paths:
         if not input_path.is_file():
@@ -96,9 +149,13 @@ def build_homophones(
 
     for record in _iter_records(sorted_inputs, limit_documents):
         counters.documents += 1
-        for start, end in split_sentence_spans(record["text"]):
+        for sentence_index, (start, end) in enumerate(
+            split_sentence_spans(record["text"])
+        ):
             counters.sentences += 1
             sentence = record["text"][start:end]
+            sentence_id = f"{record['document_id']}:s{sentence_index:06d}"
+            sentence_reason = _natural_sentence_rejection_reason(sentence)
             for token in tokenize_record(
                 record, start, sentence, tokenizer, split_mode
             ):
@@ -106,11 +163,29 @@ def build_homophones(
                 counters.reading_sources[token.reading_source] += 1
                 if not _contains_kanji(token.surface):
                     continue
+                rejection_reason = sentence_reason or _natural_token_rejection_reason(
+                    token
+                )
+                if rejection_reason:
+                    counters.naturalness_rejections[rejection_reason] += 1
+                    continue
+                counters.natural_candidate_tokens += 1
                 candidates = counts[token.reading]
                 candidate = candidates.setdefault(token.surface, CandidateStats())
-                candidate.observe(token, record["source"])
+                candidate.observe(
+                    token,
+                    record["source"],
+                    record["document_id"],
+                    sentence_id,
+                )
 
-    groups = _build_groups(counts, min_group_size, min_candidate_count)
+    groups, quality = _build_groups(
+        counts,
+        min_group_size,
+        min_candidate_count,
+        min_natural_occurrences,
+        min_natural_sentences,
+    )
     group_occurrences = sum(
         int(group["total_occurrences"]) for group in groups.values()
     )
@@ -129,6 +204,8 @@ def build_homophones(
         split_mode,
         groups,
         occurrences_path,
+        min_natural_occurrences=min_natural_occurrences,
+        min_natural_sentences=min_natural_sentences,
     )
     if occurrence_count != group_occurrences:
         raise RuntimeError(
@@ -162,6 +239,16 @@ def build_homophones(
             "min_group_size": min_group_size,
             "min_candidate_count": min_candidate_count,
             "candidate_definition": "A surface form with an attested token occurrence",
+            "naturalness": {
+                "policy": NATURALNESS_POLICY_VERSION,
+                "min_occurrences_per_candidate": min_natural_occurrences,
+                "min_sentences_per_candidate": min_natural_sentences,
+                "content_pos": sorted(NATURAL_CONTENT_POS),
+                "sentence_filter": "reject markup, URL-like, control-heavy, and excessively long contexts",
+                "surface_filter": "reject OOV, affix/function, mixed ASCII/digit, and non-Japanese noise",
+                "variant_filter": "keep the most frequent representative when kana/okurigana-only variants share a kanji skeleton",
+                "lemma_filter": "require distinct dominant dictionary lemmas within each group",
+            },
         },
         "tokenizer": {
             "implementation": "SudachiPy",
@@ -174,6 +261,7 @@ def build_homophones(
             "documents": counters.documents,
             "sentences": counters.sentences,
             "valid_tokens": counters.valid_tokens,
+            "natural_candidate_tokens": counters.natural_candidate_tokens,
             "reading_source_counts": dict(sorted(counters.reading_sources.items())),
             "homophone_groups": len(groups),
             "candidate_forms": sum(
@@ -182,6 +270,12 @@ def build_homophones(
             "occurrences": occurrence_count,
             "pipeline_commit": pipeline_commit,
             **({"document_limit": limit_documents} if limit_documents else {}),
+        },
+        "quality": {
+            **quality,
+            "token_rejection_reasons": dict(
+                sorted(counters.naturalness_rejections.items())
+            ),
         },
         "assets": assets,
     }
@@ -218,6 +312,8 @@ def tokenize(sentence: str, tokenizer: Any, split_mode: Any) -> Iterator[Token]:
         if not reading:
             continue
         lemma = morpheme.dictionary_form() or surface
+        is_oov_method = getattr(morpheme, "is_oov", None)
+        is_oov = bool(is_oov_method()) if callable(is_oov_method) else False
         yield Token(
             surface=surface,
             reading=reading,
@@ -227,6 +323,7 @@ def tokenize(sentence: str, tokenizer: Any, split_mode: Any) -> Iterator[Token]:
             subsubpos=parts[2] if len(parts) > 2 else "UNK",
             start=morpheme.begin(),
             end=morpheme.end(),
+            is_oov=is_oov,
         )
 
 
@@ -292,26 +389,60 @@ def _build_groups(
     counts: dict[str, dict[str, CandidateStats]],
     min_group_size: int,
     min_candidate_count: int,
-) -> dict[str, dict[str, Any]]:
+    min_natural_occurrences: int,
+    min_natural_sentences: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
+    raw_candidate_forms = sum(len(candidates) for candidates in counts.values())
+    candidate_rejection_reasons: Counter[str] = Counter()
+    group_rejection_reasons: Counter[str] = Counter()
+    rejected_candidate_forms = 0
+    rejected_groups = 0
+    variant_collapsed_forms = 0
+    candidate_forms_after_evidence_filter = 0
     for reading in sorted(counts):
         candidates: list[dict[str, Any]] = []
         for surface in sorted(counts[reading]):
             stats = counts[reading][surface]
-            if not _contains_kanji(surface):
-                continue
             if stats.count < min_candidate_count:
+                rejected_candidate_forms += 1
+                candidate_rejection_reasons["below_min_candidate_count"] += 1
                 continue
+            if stats.count < min_natural_occurrences:
+                rejected_candidate_forms += 1
+                candidate_rejection_reasons["insufficient_occurrences"] += 1
+                continue
+            if stats.sentence_count < min_natural_sentences:
+                rejected_candidate_forms += 1
+                candidate_rejection_reasons["insufficient_sentences"] += 1
+                continue
+            candidate_forms_after_evidence_filter += 1
+            dominant_lemma = _dominant_counter_key(stats.lemmas)
             candidates.append(
                 {
                     "surface": surface,
                     "occurrence_count": stats.count,
+                    "document_count": stats.document_count,
+                    "sentence_count": stats.sentence_count,
+                    "lemma_count": len(stats.lemmas),
+                    "dominant_lemma": dominant_lemma,
                     "lemmas": sorted(stats.lemmas),
                     "parts_of_speech": sorted(stats.parts_of_speech),
                     "source_counts": dict(sorted(stats.sources.items())),
+                    "reading_source_counts": dict(
+                        sorted(stats.reading_sources.items())
+                    ),
                 }
             )
+        candidates, collapsed = _collapse_orthographic_variants(candidates)
+        variant_collapsed_forms += collapsed
         if len(candidates) < min_group_size:
+            rejected_groups += 1
+            group_rejection_reasons["too_few_candidates"] += 1
+            continue
+        if len({candidate["dominant_lemma"] for candidate in candidates}) < min_group_size:
+            rejected_groups += 1
+            group_rejection_reasons["same_dominant_lemma"] += 1
             continue
         groups[reading] = {
             "schema_version": 1,
@@ -323,7 +454,113 @@ def _build_groups(
             ),
             "candidates": candidates,
         }
-    return groups
+    quality = {
+        "raw_reading_groups": len(counts),
+        "raw_candidate_forms": raw_candidate_forms,
+        "candidate_forms_after_evidence_filter": candidate_forms_after_evidence_filter,
+        "rejected_candidate_forms": rejected_candidate_forms,
+        "rejected_groups": rejected_groups,
+        "variant_collapsed_forms": variant_collapsed_forms,
+        "candidate_rejection_reasons": dict(sorted(candidate_rejection_reasons.items())),
+        "group_rejection_reasons": dict(sorted(group_rejection_reasons.items())),
+        "selected_groups": len(groups),
+        "selected_candidate_forms": sum(
+            int(group["candidate_count"]) for group in groups.values()
+        ),
+        "selected_occurrences": sum(
+            int(group["total_occurrences"]) for group in groups.values()
+        ),
+    }
+    return groups, quality
+
+
+def _collapse_orthographic_variants(
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for candidate in candidates:
+        by_key[_orthographic_key(candidate["surface"])].append(candidate)
+
+    selected: list[dict[str, Any]] = []
+    collapsed = 0
+    for variants in by_key.values():
+        variants.sort(
+            key=lambda candidate: (
+                -int(candidate["occurrence_count"]),
+                -int(candidate["document_count"]),
+                -int(candidate["sentence_count"]),
+                candidate["surface"],
+            )
+        )
+        selected.append(variants[0])
+        collapsed += len(variants) - 1
+    selected.sort(key=lambda candidate: candidate["surface"])
+    return selected, collapsed
+
+
+def _dominant_counter_key(counter: Counter[str]) -> str:
+    if not counter:
+        return ""
+    return min(counter, key=lambda value: (-counter[value], value))
+
+
+def _orthographic_key(surface: str) -> str:
+    """Fold kana/okurigana so spelling variants do not become homophones."""
+
+    normalized = unicodedata.normalize("NFKC", surface)
+    return "".join(
+        character
+        for character in normalized
+        if not ("\u3041" <= character <= "\u309f")
+        and not ("\u30a0" <= character <= "\u30ff")
+    )
+
+
+def _natural_token_rejection_reason(token: Token) -> str | None:
+    if token.is_oov:
+        return "unknown_token"
+    if token.pos not in NATURAL_CONTENT_POS:
+        return "non_content_pos"
+    if token.pos == "名詞" and token.subpos in {"数詞", "形式名詞"}:
+        return "non_lexical_noun"
+    if not _is_natural_surface(token.surface):
+        return "surface_noise"
+    if len(token.surface) > MAX_NATURAL_SURFACE_CHARACTERS:
+        return "surface_too_long"
+    if len(token.reading) > MAX_NATURAL_READING_CHARACTERS:
+        return "reading_too_long"
+    return None
+
+
+def _natural_sentence_rejection_reason(sentence: str) -> str | None:
+    if not sentence or len(sentence) > 2_000:
+        return "context_too_long"
+    if any(marker in sentence for marker in NATURAL_NOISE_MARKERS):
+        return "noisy_context"
+    if sum(character.isascii() and character.isalnum() for character in sentence) > max(
+        20, len(sentence) // 4
+    ):
+        return "ascii_heavy_context"
+    if sum(character.isdigit() for character in sentence) > max(12, len(sentence) // 5):
+        return "numeric_heavy_context"
+    return None
+
+
+def _is_natural_surface(surface: str) -> bool:
+    if not surface or surface != surface.strip():
+        return False
+    for character in surface:
+        if (
+            "\u3041" <= character <= "\u309f"
+            or "\u30a0" <= character <= "\u30ff"
+            or "\u3400" <= character <= "\u4dbf"
+            or "\u4e00" <= character <= "\u9fff"
+            or "\uf900" <= character <= "\ufaff"
+            or character in "々〆"
+        ):
+            continue
+        return False
+    return True
 
 
 def _write_occurrences(
@@ -333,6 +570,9 @@ def _write_occurrences(
     split_mode: Any,
     groups: dict[str, dict[str, Any]],
     output_path: Path,
+    *,
+    min_natural_occurrences: int,
+    min_natural_sentences: int,
 ) -> int:
     candidate_surfaces = {
         reading: {candidate["surface"] for candidate in group["candidates"]}
@@ -347,11 +587,16 @@ def _write_occurrences(
                 sentence_start = start
                 sentence_end = end
                 sentence_id = f"{record['document_id']}:s{sentence_index:06d}"
+                sentence_reason = _natural_sentence_rejection_reason(sentence)
                 for token_index, token in enumerate(
                     tokenize_record(
                         record, start, sentence, tokenizer, split_mode
                     )
                 ):
+                    if not _contains_kanji(token.surface):
+                        continue
+                    if sentence_reason or _natural_token_rejection_reason(token):
+                        continue
                     if token.reading not in candidate_surfaces:
                         continue
                     if token.surface not in candidate_surfaces[token.reading]:

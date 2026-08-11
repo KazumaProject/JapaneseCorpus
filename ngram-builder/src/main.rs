@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use japanese_corpus_ngram::{
-    build, build_homophones, BuildOptions, HomophoneBuildOptions,
-};
+use japanese_corpus_ngram::{build, build_homophones, BuildOptions, HomophoneBuildOptions};
 
 #[derive(Debug, Parser)]
 #[command(about = "Build Mozc-format 1/2/3-gram dictionaries from JapaneseCorpus")]
@@ -60,6 +58,10 @@ enum Command {
         min_group_size: usize,
         #[arg(long, default_value_t = 1)]
         min_candidate_count: u64,
+        #[arg(long, default_value_t = 2)]
+        min_natural_occurrences: u64,
+        #[arg(long, default_value_t = 2)]
+        min_natural_sentences: u64,
         #[arg(long, default_value = "unknown")]
         vibrato_dictionary_version: String,
         #[arg(long, default_value = "working-tree")]
@@ -110,6 +112,8 @@ fn main() -> Result<()> {
             output_dir,
             min_group_size,
             min_candidate_count,
+            min_natural_occurrences,
+            min_natural_sentences,
             vibrato_dictionary_version,
             pipeline_commit,
         } => build_homophones(HomophoneBuildOptions {
@@ -118,6 +122,8 @@ fn main() -> Result<()> {
             output_dir,
             min_group_size,
             min_candidate_count,
+            min_natural_occurrences,
+            min_natural_sentences,
             vibrato_dictionary_version,
             pipeline_commit,
         }),

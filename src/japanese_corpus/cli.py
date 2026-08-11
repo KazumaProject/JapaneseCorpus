@@ -59,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
     homophones.add_argument("--dictionary-version", default="SudachiDict")
     homophones.add_argument("--pipeline-commit", default="working-tree")
     homophones.add_argument("--limit-documents", type=int, default=0)
+    homophones.add_argument(
+        "--min-natural-occurrences", type=int, default=2,
+        help="Require this many clean occurrences for every candidate form",
+    )
+    homophones.add_argument(
+        "--min-natural-sentences", type=int, default=2,
+        help="Require this many distinct clean sentences for every candidate form",
+    )
 
     paths = subparsers.add_parser(
         "list-aozora-paths", help="List public-domain source ZIP paths"
@@ -128,6 +136,8 @@ def main(argv: list[str] | None = None) -> None:
             dictionary_version=args.dictionary_version,
             pipeline_commit=args.pipeline_commit,
             limit_documents=args.limit_documents,
+            min_natural_occurrences=args.min_natural_occurrences,
+            min_natural_sentences=args.min_natural_sentences,
         )
     elif args.command == "list-aozora-paths":
         args.output.parent.mkdir(parents=True, exist_ok=True)

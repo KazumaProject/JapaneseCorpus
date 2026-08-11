@@ -109,26 +109,35 @@ EDRDGが日次配布する英語版JMdictから、カタカナだけで構成さ
 ## Homophone context corpus
 
 同音異義語用の派生コーパスは、既存のWikipedia／青空文庫JSONLをSudachiPyで
-解析し、同じ正規化読みから2種類以上の異なる表記が実際に出現したグループだけを
-抽出します。表記ごとの頻度、原形、品詞、出典別件数を保持し、出現例には文、
-Unicodeコードポイント単位の文書内オフセット、前後文脈を保存します。
-かな漢字変換用のノイズを抑えるため、候補表記は漢字を1文字以上含むものに限定し、
-青空文庫ではトークン範囲と一致するルビをSudachiの読みより優先します。
+解析し、自然性査定を通過した同音語だけを残します。査定条件は、辞書既知の内容語、
+日本語として妥当な表記、URL・マークアップ・数値表中心でない文脈、候補ごとの最低2出現・
+2文、異なる支配lemmaを持つグループです。かな・送り仮名だけが異なる表記揺れは、
+コーパス内で最も頻出する代表形に統合します。除外理由と件数はmanifestの`quality`に
+記録するため、全量を査定した結果を再検証できます。
+
+表記ごとの頻度、文書数、文数、原形、品詞、出典別件数を保持し、出現例には文、Unicode
+コードポイント単位の文書内オフセット、前後文脈を保存します。青空文庫ではトークン範囲と
+一致するルビをSudachiの読みより優先します。
 
 生成には追加依存のSudachiPyとSudachiDict-coreが必要です。
+自動Releaseでは同じ査定ポリシーをRust/Vibrato/IPADICの高速実装で適用します。
 
 ```console
 python3 -m pip install -e '.[homophones]'
+inputs=()
+for path in work/benchmark/base-corpus/*.jsonl.zst; do
+  inputs+=(--input "$path")
+done
 PYTHONPATH=src python3 -m japanese_corpus build-homophones \
-  --input work/benchmark/base-corpus/wikipedia-20260719-00000.jsonl.zst \
-  --input work/benchmark/base-corpus/aozora-b2b3dac2e450.jsonl.zst \
+  "${inputs[@]}" \
   --output-dir work/homophone-corpus \
   --pipeline-commit "$(git rev-parse HEAD)"
 ```
 
-開発時は`--limit-documents 1000`で先頭の文書だけを処理できます。頻度で候補を
-削らず、既定値の`--min-candidate-count 1`では1回だけ出現する語も残します。
-候補を高頻度語に限定する場合だけ、この閾値を上げてください。
+全量生成では`work/benchmark/base-corpus`にあるWikipedia全shardと青空文庫を対象にします。
+開発時は`--limit-documents 1000`で先頭の文書だけを処理できます。`--min-natural-occurrences`
+と`--min-natural-sentences`を下げると査定を緩められますが、公開Releaseは既定の保守的な
+自然性ポリシーで生成します。
 
 グループと出現例のスキーマは、それぞれ
 `schema/homophone-group.schema.json`と`schema/homophone-occurrence.schema.json`、

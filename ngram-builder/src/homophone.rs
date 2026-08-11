@@ -8,14 +8,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vibrato::{Dictionary, Tokenizer};
 
-use crate::tokenizer::{
-    split_sentence_spans, AnnotatedToken, AnnotatedTokenSequenceBuilder,
-};
+use crate::tokenizer::{split_sentence_spans, AnnotatedToken, AnnotatedTokenSequenceBuilder};
 
 const HOMOPHONE_GROUPS_ASSET: &str = "homophone-groups.jsonl.zst";
 const HOMOPHONE_OCCURRENCES_ASSET: &str = "homophone-occurrences.jsonl.zst";
 const HOMOPHONE_MANIFEST_ASSET: &str = "homophone-manifest.json";
 const HOMOPHONE_CHECKSUMS_ASSET: &str = "HOMOPHONE-SHA256SUMS";
+const NATURALNESS_POLICY_VERSION: &str = "conservative-v1";
+const NATURAL_CONTENT_POS: &[&str] = &["名詞", "動詞", "形容詞", "形状詞", "副詞", "連体詞"];
+const MAX_NATURAL_SURFACE_CHARACTERS: usize = 24;
+const MAX_NATURAL_READING_CHARACTERS: usize = 24;
 
 #[derive(Debug)]
 pub struct HomophoneBuildOptions {
@@ -24,6 +26,8 @@ pub struct HomophoneBuildOptions {
     pub output_dir: PathBuf,
     pub min_group_size: usize,
     pub min_candidate_count: u64,
+    pub min_natural_occurrences: u64,
+    pub min_natural_sentences: u64,
     pub vibrato_dictionary_version: String,
     pub pipeline_commit: String,
 }
@@ -35,6 +39,21 @@ struct CorpusRecord {
     title: String,
     url: String,
     text: String,
+    #[serde(default)]
+    annotations: Annotations,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Annotations {
+    #[serde(default)]
+    ruby: Vec<RubyAnnotation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RubyAnnotation {
+    start: usize,
+    end: usize,
+    reading: String,
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +62,11 @@ struct CandidateStats {
     lemma_counts: BTreeMap<String, u64>,
     pos_counts: BTreeMap<String, u64>,
     source_counts: BTreeMap<String, u64>,
+    reading_source_counts: BTreeMap<String, u64>,
+    document_count: u64,
+    sentence_count: u64,
+    last_document_key: String,
+    last_sentence_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -50,15 +74,22 @@ struct BuildStats {
     documents: u64,
     sentences: u64,
     valid_tokens: u64,
+    natural_candidate_tokens: u64,
+    token_rejection_reasons: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Serialize)]
 struct CandidateSummary {
     surface: String,
     occurrence_count: u64,
+    document_count: u64,
+    sentence_count: u64,
+    lemma_count: usize,
+    dominant_lemma: String,
     lemmas: Vec<String>,
     parts_of_speech: Vec<String>,
     source_counts: BTreeMap<String, u64>,
+    reading_source_counts: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +107,7 @@ struct Occurrence {
     schema_version: u8,
     group_id: String,
     reading: String,
+    reading_source: String,
     surface: String,
     lemma: String,
     pos: String,
@@ -111,6 +143,7 @@ struct HomophoneManifest {
     selection: SelectionMetadata,
     tokenizer: TokenizerMetadata,
     corpus: CorpusMetadata,
+    quality: QualityMetadata,
     assets: Vec<AssetMetadata>,
 }
 
@@ -130,6 +163,19 @@ struct SelectionMetadata {
     min_group_size: usize,
     min_candidate_count: u64,
     candidate_definition: &'static str,
+    naturalness: NaturalnessMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct NaturalnessMetadata {
+    policy: &'static str,
+    min_occurrences_per_candidate: u64,
+    min_sentences_per_candidate: u64,
+    content_pos: Vec<&'static str>,
+    sentence_filter: &'static str,
+    surface_filter: &'static str,
+    variant_filter: &'static str,
+    lemma_filter: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,28 +188,51 @@ struct TokenizerMetadata {
 
 #[derive(Debug, Serialize)]
 struct CorpusMetadata {
-    input_assets: Vec<String>,
+    input_assets: Vec<InputAssetMetadata>,
     documents: u64,
     sentences: u64,
     valid_tokens: u64,
+    natural_candidate_tokens: u64,
     homophone_groups: u64,
     candidate_forms: u64,
     occurrences: u64,
     pipeline_commit: String,
 }
 
+#[derive(Debug, Serialize)]
+struct InputAssetMetadata {
+    name: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+struct QualityMetadata {
+    raw_reading_groups: u64,
+    raw_candidate_forms: u64,
+    candidate_forms_after_evidence_filter: u64,
+    rejected_candidate_forms: u64,
+    rejected_groups: u64,
+    variant_collapsed_forms: u64,
+    selected_groups: u64,
+    selected_candidate_forms: u64,
+    selected_occurrences: u64,
+    candidate_rejection_reasons: BTreeMap<String, u64>,
+    group_rejection_reasons: BTreeMap<String, u64>,
+    token_rejection_reasons: BTreeMap<String, u64>,
+}
+
 pub fn build_homophones(mut options: HomophoneBuildOptions) -> Result<()> {
     validate_options(&mut options)?;
     fs::create_dir_all(&options.output_dir)?;
 
-    let dictionary = Dictionary::read(
-        File::open(&options.vibrato_dictionary).with_context(|| {
+    let dictionary =
+        Dictionary::read(File::open(&options.vibrato_dictionary).with_context(|| {
             format!(
                 "opening Vibrato dictionary {}",
                 options.vibrato_dictionary.display()
             )
-        })?,
-    )?;
+        })?)?;
     let tokenizer = Tokenizer::new(dictionary);
     let sequence_builder = AnnotatedTokenSequenceBuilder::new(&tokenizer);
 
@@ -174,7 +243,19 @@ pub fn build_homophones(mut options: HomophoneBuildOptions) -> Result<()> {
         collect_statistics(input, &sequence_builder, &mut counts, &mut stats)?;
     }
 
-    let groups = build_groups(counts, options.min_group_size, options.min_candidate_count);
+    let (groups, mut quality) = build_groups(
+        counts,
+        options.min_group_size,
+        options.min_candidate_count,
+        options.min_natural_occurrences,
+        options.min_natural_sentences,
+    );
+    quality.token_rejection_reasons = stats.token_rejection_reasons.clone();
+    let input_assets = options
+        .inputs
+        .iter()
+        .map(|path| input_asset_metadata(path))
+        .collect::<Result<Vec<_>>>()?;
     let candidate_forms = groups
         .values()
         .map(|group| group.candidate_count as u64)
@@ -230,6 +311,16 @@ pub fn build_homophones(mut options: HomophoneBuildOptions) -> Result<()> {
             min_group_size: options.min_group_size,
             min_candidate_count: options.min_candidate_count,
             candidate_definition: "A surface form with an attested token occurrence",
+            naturalness: NaturalnessMetadata {
+                policy: NATURALNESS_POLICY_VERSION,
+                min_occurrences_per_candidate: options.min_natural_occurrences,
+                min_sentences_per_candidate: options.min_natural_sentences,
+                content_pos: NATURAL_CONTENT_POS.to_vec(),
+                sentence_filter: "reject markup, URL-like, control-heavy, and excessively long contexts",
+                surface_filter: "reject OOV, affix/function, mixed ASCII/digit, and non-Japanese noise",
+                variant_filter: "keep the most frequent representative when kana/okurigana-only variants share a kanji skeleton",
+                lemma_filter: "require distinct dominant dictionary lemmas within each group",
+            },
         },
         tokenizer: TokenizerMetadata {
             implementation: "Vibrato",
@@ -238,24 +329,17 @@ pub fn build_homophones(mut options: HomophoneBuildOptions) -> Result<()> {
             dictionary_version: options.vibrato_dictionary_version.clone(),
         },
         corpus: CorpusMetadata {
-            input_assets: options
-                .inputs
-                .iter()
-                .map(|path| {
-                    path.file_name()
-                        .unwrap_or(path.as_os_str())
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect(),
+            input_assets,
             documents: stats.documents,
             sentences: stats.sentences,
             valid_tokens: stats.valid_tokens,
+            natural_candidate_tokens: stats.natural_candidate_tokens,
             homophone_groups: groups.len() as u64,
             candidate_forms,
             occurrences,
             pipeline_commit: options.pipeline_commit.clone(),
         },
+        quality,
         assets,
     };
     let manifest_path = options.output_dir.join(HOMOPHONE_MANIFEST_ASSET);
@@ -287,6 +371,12 @@ fn validate_options(options: &mut HomophoneBuildOptions) -> Result<()> {
     if options.min_candidate_count == 0 {
         bail!("--min-candidate-count must be positive");
     }
+    if options.min_natural_occurrences == 0 {
+        bail!("--min-natural-occurrences must be positive");
+    }
+    if options.min_natural_sentences == 0 {
+        bail!("--min-natural-sentences must be positive");
+    }
     Ok(())
 }
 
@@ -298,53 +388,140 @@ fn collect_statistics(
 ) -> Result<()> {
     for_each_record(input, |record| {
         stats.documents += 1;
-        for span in split_sentence_spans(&record.text) {
+        for (sentence_index, span) in split_sentence_spans(&record.text).into_iter().enumerate() {
             stats.sentences += 1;
             let sentence = &record.text[span.start_byte..span.end_byte];
-            for token in sequence_builder.tokenize(sentence)? {
+            let sentence_start = record.text[..span.start_byte].chars().count();
+            let sentence_id = format!("{}:s{:06}", record.document_id, sentence_index);
+            let sentence_reason = natural_sentence_rejection_reason(sentence);
+            for mut token in sequence_builder.tokenize(sentence)? {
+                apply_ruby(&record, sentence, sentence_start, &mut token);
                 stats.valid_tokens += 1;
+                if !contains_kanji(&token.surface) {
+                    continue;
+                }
+                if let Some(reason) =
+                    sentence_reason.or_else(|| natural_token_rejection_reason(&token))
+                {
+                    *stats
+                        .token_rejection_reasons
+                        .entry(reason.to_owned())
+                        .or_default() += 1;
+                    continue;
+                }
+                stats.natural_candidate_tokens += 1;
                 let candidates = counts.entry(token.reading.clone()).or_default();
                 let candidate = candidates.entry(token.surface.clone()).or_default();
-                observe_candidate(candidate, &token, &record.source);
+                observe_candidate(
+                    candidate,
+                    &token,
+                    &record.source,
+                    &record.document_id,
+                    &sentence_id,
+                );
             }
         }
         Ok(())
     })
 }
 
-fn observe_candidate(stats: &mut CandidateStats, token: &AnnotatedToken, source: &str) {
+fn observe_candidate(
+    stats: &mut CandidateStats,
+    token: &AnnotatedToken,
+    source: &str,
+    document_id: &str,
+    sentence_id: &str,
+) {
     stats.count += 1;
     *stats.lemma_counts.entry(token.lemma.clone()).or_default() += 1;
     let pos = format!("{}/{}/{}", token.pos, token.subpos, token.subsubpos);
     *stats.pos_counts.entry(pos).or_default() += 1;
     *stats.source_counts.entry(source.to_owned()).or_default() += 1;
+    *stats
+        .reading_source_counts
+        .entry(token.reading_source.clone())
+        .or_default() += 1;
+    let document_key = format!("{source}\u{1f}{document_id}");
+    if document_key != stats.last_document_key {
+        stats.document_count += 1;
+        stats.last_document_key = document_key;
+    }
+    if sentence_id != stats.last_sentence_id {
+        stats.sentence_count += 1;
+        stats.last_sentence_id = sentence_id.to_owned();
+    }
 }
 
 fn build_groups(
     counts: HashMap<String, HashMap<String, CandidateStats>>,
     min_group_size: usize,
     min_candidate_count: u64,
-) -> BTreeMap<String, GroupSummary> {
+    min_natural_occurrences: u64,
+    min_natural_sentences: u64,
+) -> (BTreeMap<String, GroupSummary>, QualityMetadata) {
     let mut groups = BTreeMap::new();
+    let raw_reading_groups = counts.len() as u64;
+    let raw_candidate_forms = counts.values().map(HashMap::len).sum::<usize>() as u64;
+    let mut candidate_rejection_reasons = BTreeMap::new();
+    let mut group_rejection_reasons = BTreeMap::new();
+    let mut rejected_candidate_forms = 0;
+    let mut rejected_groups = 0;
+    let mut variant_collapsed_forms = 0;
+    let mut candidate_forms_after_evidence_filter = 0;
     for (reading, candidates) in counts {
         let mut summaries = Vec::new();
         for (surface, stats) in candidates {
-            if !contains_kanji(&surface) {
-                continue;
-            }
             if stats.count < min_candidate_count {
+                rejected_candidate_forms += 1;
+                increment_reason(
+                    &mut candidate_rejection_reasons,
+                    "below_min_candidate_count",
+                );
                 continue;
             }
+            if stats.count < min_natural_occurrences {
+                rejected_candidate_forms += 1;
+                increment_reason(&mut candidate_rejection_reasons, "insufficient_occurrences");
+                continue;
+            }
+            if stats.sentence_count < min_natural_sentences {
+                rejected_candidate_forms += 1;
+                increment_reason(&mut candidate_rejection_reasons, "insufficient_sentences");
+                continue;
+            }
+            candidate_forms_after_evidence_filter += 1;
+            let dominant_lemma = dominant_lemma(&stats.lemma_counts);
             summaries.push(CandidateSummary {
                 surface,
                 occurrence_count: stats.count,
+                document_count: stats.document_count,
+                sentence_count: stats.sentence_count,
+                lemma_count: stats.lemma_counts.len(),
+                dominant_lemma,
                 lemmas: stats.lemma_counts.into_keys().collect(),
                 parts_of_speech: stats.pos_counts.into_keys().collect(),
                 source_counts: stats.source_counts,
+                reading_source_counts: stats.reading_source_counts,
             });
         }
+        let (collapsed, count) = collapse_orthographic_variants(summaries);
+        summaries = collapsed;
+        variant_collapsed_forms += count;
         summaries.sort_by(|left, right| left.surface.cmp(&right.surface));
         if summaries.len() < min_group_size {
+            rejected_groups += 1;
+            increment_reason(&mut group_rejection_reasons, "too_few_candidates");
+            continue;
+        }
+        if summaries
+            .iter()
+            .map(|candidate| candidate.dominant_lemma.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            < min_group_size
+        {
+            rejected_groups += 1;
+            increment_reason(&mut group_rejection_reasons, "same_dominant_lemma");
             continue;
         }
         let total_occurrences = summaries
@@ -363,7 +540,85 @@ fn build_groups(
             },
         );
     }
-    groups
+    let selected_candidate_forms = groups
+        .values()
+        .map(|group| group.candidate_count as u64)
+        .sum();
+    let selected_occurrences = groups.values().map(|group| group.total_occurrences).sum();
+    let selected_groups = groups.len() as u64;
+    (
+        groups,
+        QualityMetadata {
+            raw_reading_groups,
+            raw_candidate_forms,
+            candidate_forms_after_evidence_filter,
+            rejected_candidate_forms,
+            rejected_groups,
+            variant_collapsed_forms,
+            selected_groups,
+            selected_candidate_forms,
+            selected_occurrences,
+            candidate_rejection_reasons,
+            group_rejection_reasons,
+            token_rejection_reasons: BTreeMap::new(),
+        },
+    )
+}
+
+fn increment_reason(reasons: &mut BTreeMap<String, u64>, reason: &str) {
+    *reasons.entry(reason.to_owned()).or_default() += 1;
+}
+
+fn dominant_lemma(counts: &BTreeMap<String, u64>) -> String {
+    counts
+        .iter()
+        .max_by(|(left_lemma, left_count), (right_lemma, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_lemma.cmp(left_lemma))
+        })
+        .map(|(lemma, _)| lemma.clone())
+        .unwrap_or_default()
+}
+
+fn collapse_orthographic_variants(
+    candidates: Vec<CandidateSummary>,
+) -> (Vec<CandidateSummary>, u64) {
+    let mut by_key: HashMap<String, Vec<CandidateSummary>> = HashMap::new();
+    for candidate in candidates {
+        by_key
+            .entry(orthographic_key(&candidate.surface))
+            .or_default()
+            .push(candidate);
+    }
+    let mut selected = Vec::new();
+    let mut collapsed = 0;
+    for mut variants in by_key.into_values() {
+        variants.sort_by(|left, right| {
+            right
+                .occurrence_count
+                .cmp(&left.occurrence_count)
+                .then_with(|| right.document_count.cmp(&left.document_count))
+                .then_with(|| right.sentence_count.cmp(&left.sentence_count))
+                .then_with(|| left.surface.cmp(&right.surface))
+        });
+        collapsed += variants.len().saturating_sub(1) as u64;
+        selected.push(variants.remove(0));
+    }
+    selected.sort_by(|left, right| left.surface.cmp(&right.surface));
+    (selected, collapsed)
+}
+
+fn orthographic_key(surface: &str) -> String {
+    surface
+        .chars()
+        .filter(|character| {
+            !matches!(
+                character,
+                '\u{3041}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}'
+            )
+        })
+        .collect()
 }
 
 fn contains_kanji(value: &str) -> bool {
@@ -375,6 +630,108 @@ fn contains_kanji(value: &str) -> bool {
                 | '\u{F900}'..='\u{FAFF}'
         )
     })
+}
+
+fn natural_token_rejection_reason(token: &AnnotatedToken) -> Option<&'static str> {
+    if token.pos == "UNK" {
+        return Some("unknown_token");
+    }
+    if !NATURAL_CONTENT_POS.contains(&token.pos.as_str()) {
+        return Some("non_content_pos");
+    }
+    if token.pos == "名詞" && matches!(token.subpos.as_str(), "数詞" | "形式名詞") {
+        return Some("non_lexical_noun");
+    }
+    if !is_natural_surface(&token.surface) {
+        return Some("surface_noise");
+    }
+    if token.surface.chars().count() > MAX_NATURAL_SURFACE_CHARACTERS {
+        return Some("surface_too_long");
+    }
+    if token.reading.chars().count() > MAX_NATURAL_READING_CHARACTERS {
+        return Some("reading_too_long");
+    }
+    None
+}
+
+fn natural_sentence_rejection_reason(sentence: &str) -> Option<&'static str> {
+    if sentence.is_empty() || sentence.chars().count() > 2_000 {
+        return Some("context_too_long");
+    }
+    for marker in [
+        "http://", "https://", "www.", "[[", "]]", "{{", "}}", "<ref", "</ref>", "ISBN", "==", "|",
+    ] {
+        if sentence.contains(marker) {
+            return Some("noisy_context");
+        }
+    }
+    let ascii_alnum = sentence
+        .chars()
+        .filter(|character| character.is_ascii() && character.is_ascii_alphanumeric())
+        .count();
+    if ascii_alnum > 20.max(sentence.chars().count() / 4) {
+        return Some("ascii_heavy_context");
+    }
+    let digits = sentence
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .count();
+    if digits > 12.max(sentence.chars().count() / 5) {
+        return Some("numeric_heavy_context");
+    }
+    None
+}
+
+fn is_natural_surface(surface: &str) -> bool {
+    if surface.is_empty() || surface.trim() != surface {
+        return false;
+    }
+    surface.chars().all(|character| {
+        matches!(
+            character,
+            '\u{3041}'..='\u{309F}'
+                | '\u{30A0}'..='\u{30FF}'
+                | '\u{3400}'..='\u{4DBF}'
+                | '\u{4E00}'..='\u{9FFF}'
+                | '\u{F900}'..='\u{FAFF}'
+                | '々'
+                | '〆'
+        )
+    })
+}
+
+fn apply_ruby(
+    record: &CorpusRecord,
+    sentence: &str,
+    sentence_start_chars: usize,
+    token: &mut AnnotatedToken,
+) {
+    let token_start = sentence_start_chars + sentence[..token.start_byte].chars().count();
+    let token_end = sentence_start_chars + sentence[..token.end_byte].chars().count();
+    if let Some(annotation) = record
+        .annotations
+        .ruby
+        .iter()
+        .find(|annotation| annotation.start == token_start && annotation.end == token_end)
+    {
+        let reading = normalize_reading(&annotation.reading);
+        if !reading.is_empty() {
+            token.reading = reading;
+            token.reading_source = "aozora_ruby".to_owned();
+        }
+    }
+}
+
+fn normalize_reading(reading: &str) -> String {
+    reading
+        .chars()
+        .map(|character| match character {
+            'ァ'..='ヶ' => char::from_u32(character as u32 - 0x60).unwrap_or(character),
+            'ヽ' => 'ゝ',
+            'ヾ' => 'ゞ',
+            _ => character,
+        })
+        .collect()
 }
 
 fn write_groups<'a>(path: &Path, groups: impl Iterator<Item = &'a GroupSummary>) -> Result<()> {
@@ -399,13 +756,22 @@ fn write_occurrences(
 
     for input in inputs {
         for_each_record(input, |record| {
-            for (sentence_index, span) in split_sentence_spans(&record.text).into_iter().enumerate() {
+            for (sentence_index, span) in split_sentence_spans(&record.text).into_iter().enumerate()
+            {
                 let sentence = &record.text[span.start_byte..span.end_byte];
                 let sentence_start = record.text[..span.start_byte].chars().count();
                 let sentence_end = sentence_start + sentence.chars().count();
                 let sentence_id = format!("{}:s{:06}", record.document_id, sentence_index);
+                let sentence_reason = natural_sentence_rejection_reason(sentence);
                 let tokens = sequence_builder.tokenize(sentence)?;
-                for (token_index, token) in tokens.into_iter().enumerate() {
+                for (token_index, mut token) in tokens.into_iter().enumerate() {
+                    apply_ruby(&record, sentence, sentence_start, &mut token);
+                    if !contains_kanji(&token.surface)
+                        || sentence_reason.is_some()
+                        || natural_token_rejection_reason(&token).is_some()
+                    {
+                        continue;
+                    }
                     let Some(group) = groups.get(&token.reading) else {
                         continue;
                     };
@@ -416,12 +782,14 @@ fn write_occurrences(
                     {
                         continue;
                     }
-                    let target_start = sentence_start + sentence[..token.start_byte].chars().count();
+                    let target_start =
+                        sentence_start + sentence[..token.start_byte].chars().count();
                     let target_end = sentence_start + sentence[..token.end_byte].chars().count();
                     let occurrence = Occurrence {
                         schema_version: 1,
                         group_id: group.group_id.clone(),
                         reading: token.reading,
+                        reading_source: token.reading_source,
                         surface: token.surface,
                         lemma: token.lemma,
                         pos: token.pos,
@@ -452,14 +820,12 @@ fn write_occurrences(
     Ok(occurrence_count)
 }
 
-fn for_each_record(
-    path: &Path,
-    mut consume: impl FnMut(CorpusRecord) -> Result<()>,
-) -> Result<()> {
+fn for_each_record(path: &Path, mut consume: impl FnMut(CorpusRecord) -> Result<()>) -> Result<()> {
     let reader = open_input(path)?;
     for (line_number, line) in reader.lines().enumerate() {
         let line_number = line_number + 1;
-        let line = line.with_context(|| format!("reading {} line {}", path.display(), line_number))?;
+        let line =
+            line.with_context(|| format!("reading {} line {}", path.display(), line_number))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -506,6 +872,18 @@ fn asset_metadata(path: &Path, records: u64) -> Result<AssetMetadata> {
     })
 }
 
+fn input_asset_metadata(path: &Path) -> Result<InputAssetMetadata> {
+    Ok(InputAssetMetadata {
+        name: path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
+        bytes: fs::metadata(path)?.len(),
+        sha256: sha256_file(path)?,
+    })
+}
+
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
@@ -548,6 +926,9 @@ mod tests {
             "交渉".to_owned(),
             CandidateStats {
                 count: 2,
+                document_count: 1,
+                sentence_count: 1,
+                lemma_counts: BTreeMap::from([(String::from("交渉"), 2)]),
                 ..CandidateStats::default()
             },
         );
@@ -555,12 +936,15 @@ mod tests {
             "高尚".to_owned(),
             CandidateStats {
                 count: 1,
+                document_count: 1,
+                sentence_count: 1,
+                lemma_counts: BTreeMap::from([(String::from("高尚"), 1)]),
                 ..CandidateStats::default()
             },
         );
         counts.insert("こうしょう".to_owned(), candidates);
 
-        let groups = build_groups(counts, 2, 1);
+        let (groups, _) = build_groups(counts, 2, 1, 1, 1);
         assert_eq!(groups["こうしょう"].candidate_count, 2);
         assert_eq!(groups["こうしょう"].total_occurrences, 3);
     }
@@ -585,6 +969,7 @@ mod tests {
         );
         counts.insert("こうしょう".to_owned(), candidates);
 
-        assert!(build_groups(counts, 2, 2).is_empty());
+        let (groups, _) = build_groups(counts, 2, 2, 1, 1);
+        assert!(groups.is_empty());
     }
 }

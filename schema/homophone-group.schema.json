@@ -25,13 +25,22 @@
         "required": [
           "surface",
           "occurrence_count",
+          "document_count",
+          "sentence_count",
+          "lemma_count",
+          "dominant_lemma",
           "lemmas",
           "parts_of_speech",
-          "source_counts"
+          "source_counts",
+          "reading_source_counts"
         ],
         "properties": {
           "surface": { "type": "string", "minLength": 1 },
           "occurrence_count": { "type": "integer", "minimum": 1 },
+          "document_count": { "type": "integer", "minimum": 1 },
+          "sentence_count": { "type": "integer", "minimum": 1 },
+          "lemma_count": { "type": "integer", "minimum": 1 },
+          "dominant_lemma": { "type": "string", "minLength": 1 },
           "lemmas": {
             "type": "array",
             "items": { "type": "string", "minLength": 1 }
@@ -41,6 +50,13 @@
             "items": { "type": "string", "minLength": 1 }
           },
           "source_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "reading_source_counts": {
             "type": "object",
             "additionalProperties": {
               "type": "integer",

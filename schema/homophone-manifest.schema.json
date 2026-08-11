@@ -9,6 +9,7 @@
     "selection",
     "tokenizer",
     "corpus",
+    "quality",
     "assets"
   ],
   "properties": {
@@ -61,6 +62,47 @@
         "pipeline_commit": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": true
+    },
+    "quality": {
+      "type": "object",
+      "required": [
+        "raw_reading_groups",
+        "raw_candidate_forms",
+        "candidate_forms_after_evidence_filter",
+        "rejected_candidate_forms",
+        "rejected_groups",
+        "variant_collapsed_forms",
+        "selected_groups",
+        "selected_candidate_forms",
+        "selected_occurrences",
+        "candidate_rejection_reasons",
+        "group_rejection_reasons",
+        "token_rejection_reasons"
+      ],
+      "properties": {
+        "raw_reading_groups": { "type": "integer", "minimum": 0 },
+        "raw_candidate_forms": { "type": "integer", "minimum": 0 },
+        "candidate_forms_after_evidence_filter": { "type": "integer", "minimum": 0 },
+        "rejected_candidate_forms": { "type": "integer", "minimum": 0 },
+        "rejected_groups": { "type": "integer", "minimum": 0 },
+        "variant_collapsed_forms": { "type": "integer", "minimum": 0 },
+        "selected_groups": { "type": "integer", "minimum": 0 },
+        "selected_candidate_forms": { "type": "integer", "minimum": 0 },
+        "selected_occurrences": { "type": "integer", "minimum": 0 },
+        "candidate_rejection_reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "group_rejection_reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "token_rejection_reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "additionalProperties": false
     },
     "assets": {
       "type": "array",

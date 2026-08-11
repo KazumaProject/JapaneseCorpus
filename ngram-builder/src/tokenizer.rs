@@ -180,6 +180,7 @@ struct MorphToken {
 pub struct AnnotatedToken {
     pub surface: String,
     pub reading: String,
+    pub reading_source: String,
     pub lemma: String,
     pub pos: String,
     pub subpos: String,
@@ -304,6 +305,7 @@ impl<'a> AnnotatedTokenSequenceBuilder<'a> {
             result.push(AnnotatedToken {
                 surface: surface.to_owned(),
                 reading,
+                reading_source: "vibrato".to_owned(),
                 lemma: lemma.to_owned(),
                 pos: pos.to_owned(),
                 subpos: parts.get(1).copied().unwrap_or("UNK").to_owned(),
@@ -394,10 +396,12 @@ pub fn split_sentence_spans(text: &str) -> Vec<SentenceSpan> {
     let mut start = 0;
     for (offset, character) in text.char_indices() {
         let character_end = offset + character.len_utf8();
-        if character == '\n'
-            || matches!(character, '。' | '！' | '？' | '!' | '?')
-        {
-            let end = if character == '\n' { offset } else { character_end };
+        if character == '\n' || matches!(character, '。' | '！' | '？' | '!' | '?') {
+            let end = if character == '\n' {
+                offset
+            } else {
+                character_end
+            };
             push_trimmed_span(text, start, end, &mut result);
             start = character_end;
         }
@@ -509,8 +513,14 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(&text[spans[0].start_byte..spans[0].end_byte], "今日は晴れ。");
-        assert_eq!(&text[spans[1].start_byte..spans[1].end_byte], "明日も晴れ！");
+        assert_eq!(
+            &text[spans[0].start_byte..spans[0].end_byte],
+            "今日は晴れ。"
+        );
+        assert_eq!(
+            &text[spans[1].start_byte..spans[1].end_byte],
+            "明日も晴れ！"
+        );
     }
 
     #[test]
