@@ -59,6 +59,7 @@
         "homophone_groups": { "type": "integer", "minimum": 0 },
         "candidate_forms": { "type": "integer", "minimum": 0 },
         "occurrences": { "type": "integer", "minimum": 0 },
+        "occurrence_shard_records": { "type": "integer", "minimum": 1 },
         "pipeline_commit": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": true

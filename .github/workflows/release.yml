@@ -280,12 +280,14 @@ jobs:
             --output-dir "$OUTPUT" \
             --min-natural-occurrences 2 \
             --min-natural-sentences 2 \
+            --occurrence-shard-records 5000000 \
             --vibrato-dictionary-version "$VIBRATO_IPADIC_VERSION" \
             --pipeline-commit "$GITHUB_SHA"
           jq -e '.corpus.document_limit == null and .quality.selected_groups == .corpus.homophone_groups and .quality.selected_occurrences == .corpus.occurrences' \
             "$OUTPUT/homophone-manifest.json" >/dev/null
           zstd --test "$OUTPUT/homophone-groups.jsonl.zst"
-          zstd --test "$OUTPUT/homophone-occurrences.jsonl.zst"
+          find "$OUTPUT" -maxdepth 1 -type f -name 'homophone-occurrences-*.jsonl.zst' \
+            -print0 | sort -z | xargs -0 -n1 zstd --test
           (cd "$OUTPUT" && sha256sum --check HOMOPHONE-SHA256SUMS)
           mapfile -d '' ASSETS < <(find "$OUTPUT" -maxdepth 1 -type f -print0 | sort -z)
           gh release upload "$RELEASE_TAG" "${ASSETS[@]}"

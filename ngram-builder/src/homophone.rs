@@ -11,7 +11,6 @@ use vibrato::{Dictionary, Tokenizer};
 use crate::tokenizer::{split_sentence_spans, AnnotatedToken, AnnotatedTokenSequenceBuilder};
 
 const HOMOPHONE_GROUPS_ASSET: &str = "homophone-groups.jsonl.zst";
-const HOMOPHONE_OCCURRENCES_ASSET: &str = "homophone-occurrences.jsonl.zst";
 const HOMOPHONE_MANIFEST_ASSET: &str = "homophone-manifest.json";
 const HOMOPHONE_CHECKSUMS_ASSET: &str = "HOMOPHONE-SHA256SUMS";
 const NATURALNESS_POLICY_VERSION: &str = "conservative-v1";
@@ -28,6 +27,7 @@ pub struct HomophoneBuildOptions {
     pub min_candidate_count: u64,
     pub min_natural_occurrences: u64,
     pub min_natural_sentences: u64,
+    pub occurrence_shard_records: u64,
     pub vibrato_dictionary_version: String,
     pub pipeline_commit: String,
 }
@@ -196,6 +196,7 @@ struct CorpusMetadata {
     homophone_groups: u64,
     candidate_forms: u64,
     occurrences: u64,
+    occurrence_shard_records: u64,
     pipeline_commit: String,
 }
 
@@ -276,12 +277,12 @@ pub fn build_homophones(mut options: HomophoneBuildOptions) -> Result<()> {
     let groups_path = options.output_dir.join(HOMOPHONE_GROUPS_ASSET);
     write_groups(&groups_path, groups.values())?;
 
-    let occurrences_path = options.output_dir.join(HOMOPHONE_OCCURRENCES_ASSET);
-    let occurrences = write_occurrences(
+    let (occurrence_assets, occurrences) = write_occurrences(
         &options.inputs,
         &sequence_builder,
         &groups,
-        &occurrences_path,
+        &options.output_dir,
+        options.occurrence_shard_records,
     )?;
     if occurrences != group_occurrences {
         bail!(
@@ -292,10 +293,10 @@ pub fn build_homophones(mut options: HomophoneBuildOptions) -> Result<()> {
     }
 
     eprintln!("phase 3/3: writing manifest and checksums");
-    let assets = vec![
-        asset_metadata(&groups_path, groups.len() as u64)?,
-        asset_metadata(&occurrences_path, occurrences)?,
-    ];
+    let mut assets = vec![asset_metadata(&groups_path, groups.len() as u64)?];
+    for (path, records) in occurrence_assets {
+        assets.push(asset_metadata(&path, records)?);
+    }
     let manifest = HomophoneManifest {
         schema_version: 1,
         format: FormatMetadata {
@@ -337,6 +338,7 @@ pub fn build_homophones(mut options: HomophoneBuildOptions) -> Result<()> {
             homophone_groups: groups.len() as u64,
             candidate_forms,
             occurrences,
+            occurrence_shard_records: options.occurrence_shard_records,
             pipeline_commit: options.pipeline_commit.clone(),
         },
         quality,
@@ -376,6 +378,9 @@ fn validate_options(options: &mut HomophoneBuildOptions) -> Result<()> {
     }
     if options.min_natural_sentences == 0 {
         bail!("--min-natural-sentences must be positive");
+    }
+    if options.occurrence_shard_records == 0 {
+        bail!("--occurrence-shard-records must be positive");
     }
     Ok(())
 }
@@ -744,14 +749,39 @@ fn write_groups<'a>(path: &Path, groups: impl Iterator<Item = &'a GroupSummary>)
     Ok(())
 }
 
+struct OccurrenceShardWriter {
+    path: PathBuf,
+    encoder: zstd::stream::write::Encoder<'static, File>,
+    records: u64,
+}
+
+impl OccurrenceShardWriter {
+    fn new(output_dir: &Path, shard_index: u64) -> Result<Self> {
+        let path = output_dir.join(format!("homophone-occurrences-{shard_index:05}.jsonl.zst"));
+        let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+        Ok(Self {
+            path,
+            encoder: zstd::stream::write::Encoder::new(file, 3)?,
+            records: 0,
+        })
+    }
+
+    fn finish(self) -> Result<(PathBuf, u64)> {
+        self.encoder.finish()?;
+        Ok((self.path, self.records))
+    }
+}
+
 fn write_occurrences(
     inputs: &[PathBuf],
     sequence_builder: &AnnotatedTokenSequenceBuilder<'_>,
     groups: &BTreeMap<String, GroupSummary>,
-    path: &Path,
-) -> Result<u64> {
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut encoder = zstd::stream::write::Encoder::new(file, 3)?;
+    output_dir: &Path,
+    shard_records: u64,
+) -> Result<(Vec<(PathBuf, u64)>, u64)> {
+    let mut shard_index = 0;
+    let mut current = Some(OccurrenceShardWriter::new(output_dir, shard_index)?);
+    let mut assets = Vec::new();
     let mut occurrence_count = 0u64;
 
     for input in inputs {
@@ -782,6 +812,15 @@ fn write_occurrences(
                     {
                         continue;
                     }
+                    if current
+                        .as_ref()
+                        .is_some_and(|shard| shard.records >= shard_records)
+                    {
+                        let finished = current.take().expect("occurrence shard exists").finish()?;
+                        assets.push(finished);
+                        shard_index += 1;
+                        current = Some(OccurrenceShardWriter::new(output_dir, shard_index)?);
+                    }
                     let target_start =
                         sentence_start + sentence[..token.start_byte].chars().count();
                     let target_end = sentence_start + sentence[..token.end_byte].chars().count();
@@ -809,15 +848,23 @@ fn write_occurrences(
                         left_context: sentence[..token.start_byte].to_owned(),
                         right_context: sentence[token.end_byte..].to_owned(),
                     };
-                    write_json_line(&mut encoder, &occurrence)?;
+                    write_json_line(
+                        &mut current.as_mut().expect("occurrence shard exists").encoder,
+                        &occurrence,
+                    )?;
+                    current.as_mut().expect("occurrence shard exists").records += 1;
                     occurrence_count += 1;
                 }
             }
             Ok(())
         })?;
     }
-    encoder.finish()?;
-    Ok(occurrence_count)
+    if let Some(shard) = current.take() {
+        if shard.records > 0 {
+            assets.push(shard.finish()?);
+        }
+    }
+    Ok((assets, occurrence_count))
 }
 
 fn for_each_record(path: &Path, mut consume: impl FnMut(CorpusRecord) -> Result<()>) -> Result<()> {

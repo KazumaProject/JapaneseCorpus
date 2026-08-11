@@ -28,7 +28,7 @@
 - `JMdict_e-<date>.xml.gz` / `JMDICT-LICENSE.html`: 使用したJMdict原本とライセンス
 - `ajimee-bench-report.json`: AJIMEE-BenchによるAccuracy@1／MinCER評価
 - `homophone-groups.jsonl.zst`: 読みごとの同音語グループと候補別頻度
-- `homophone-occurrences.jsonl.zst`: 同音語の出現文、前後文脈、形態素情報
+- `homophone-occurrences-<shard>.jsonl.zst`: 同音語の出現文、前後文脈、形態素情報（500万レコード単位の分割）
 - `homophone-manifest.json` / `HOMOPHONE-SHA256SUMS`: 同音語コーパスの条件と検証値
 
 展開例:
@@ -137,7 +137,8 @@ PYTHONPATH=src python3 -m japanese_corpus build-homophones \
 全量生成では`work/benchmark/base-corpus`にあるWikipedia全shardと青空文庫を対象にします。
 開発時は`--limit-documents 1000`で先頭の文書だけを処理できます。`--min-natural-occurrences`
 と`--min-natural-sentences`を下げると査定を緩められますが、公開Releaseは既定の保守的な
-自然性ポリシーで生成します。
+自然性ポリシーで生成します。出現資産はGitHub Releaseの個別ファイル上限を超えないよう、
+既定で500万レコードごとに分割されます。
 
 グループと出現例のスキーマは、それぞれ
 `schema/homophone-group.schema.json`と`schema/homophone-occurrence.schema.json`、

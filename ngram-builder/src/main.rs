@@ -62,6 +62,8 @@ enum Command {
         min_natural_occurrences: u64,
         #[arg(long, default_value_t = 2)]
         min_natural_sentences: u64,
+        #[arg(long, default_value_t = 5_000_000)]
+        occurrence_shard_records: u64,
         #[arg(long, default_value = "unknown")]
         vibrato_dictionary_version: String,
         #[arg(long, default_value = "working-tree")]
@@ -114,6 +116,7 @@ fn main() -> Result<()> {
             min_candidate_count,
             min_natural_occurrences,
             min_natural_sentences,
+            occurrence_shard_records,
             vibrato_dictionary_version,
             pipeline_commit,
         } => build_homophones(HomophoneBuildOptions {
@@ -124,6 +127,7 @@ fn main() -> Result<()> {
             min_candidate_count,
             min_natural_occurrences,
             min_natural_sentences,
+            occurrence_shard_records,
             vibrato_dictionary_version,
             pipeline_commit,
         }),
