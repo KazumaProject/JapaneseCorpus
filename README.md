@@ -23,7 +23,7 @@
 - `mozc-trigram-<part>.txt.zst`: 隣接3語を句として格納したMozc 5列辞書
 - `mozc-id.def`: 辞書の左右文脈IDに対応するMozc定義
 - `ngram-manifest.json` / `NGRAM-SHA256SUMS`: 辞書の件数、生成条件、検証値
-- `mozc-english-unigram-<part>.txt.zst`: ひらがな読みから英語候補への辞書
+- `mozc-english-reading-unigram-<part>.txt.zst`: 発音が読み全体と一致する、ひらがな読みから英語への直接辞書
 - `english-dictionary-manifest.json` / `ENGLISH-DICTIONARY-SHA256SUMS`: 日英辞書の出典、件数、検証値
 - `JMdict_e-<date>.xml.gz` / `JMDICT-LICENSE.html`: 使用したJMdict原本とライセンス
 - `ajimee-bench-report.json`: AJIMEE-BenchによるAccuracy@1／MinCER評価
@@ -92,15 +92,18 @@ bigram/trigramの候補抽出後に全コーパスを再走査するため、収
 ## Hiragana-to-English dictionary
 
 EDRDGが日次配布する英語版JMdictから、カタカナだけで構成される読みと英語訳を
-抽出します。読みはNFKC相当の互換分解・再合成後にひらがなへ変換し、JMdictの
-読み制限、語彙優先度、語義順をMozcコストへ反映します。
+抽出します。読みはNFKC相当の互換分解・再合成後にひらがなへ変換します。
+直接辞書では、CMUdictの発音が読み全体と一致する候補だけを残し、複合語とCMUdict
+にない略語は完全一致 allowlist で明示したものだけを残します。JMdictの読み制限、
+語彙優先度、語義順はMozcコストへ反映します。
 
 ```text
 あーと<TAB>left_id<TAB>right_id<TAB>cost<TAB>art
 こんぴゅーた<TAB>left_id<TAB>right_id<TAB>cost<TAB>computer
 ```
 
-同じ読みの複数候補を残すため、一般語の`art`と略語の`ART`は別行です。
+同じ読みの自然な候補は残しますが、`ぎゃらりー`に対する`art gallery`や
+`corridor`のように読み全体に対応しない候補は収録しません。
 入力に使ったJMdict原本、SHA-256、ETag、生成日、ライセンスをReleaseへ同梱します。
 
 ## Development
@@ -129,7 +132,7 @@ conversion-engine/target/release/kana-kanji-converter \
   -n 10 こんぴゅーた
 ```
 
-出力ディレクトリに`mozc-english-unigram-*`があれば、`computer`などの英語候補も
+出力ディレクトリに`mozc-english-reading-unigram-*`があれば、`computer`などの英語候補も
 日本語候補と一緒に返ります。`-n 5`で複数候補、`--details`で採用した
 1/2/3-gramの分割とコストを確認できます。
 引数の読みを省略すると標準入力を1行ずつ変換するため、辞書を一度だけロードして

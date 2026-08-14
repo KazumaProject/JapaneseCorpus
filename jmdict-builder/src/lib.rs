@@ -1,10 +1,11 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use flate2::read::GzDecoder;
 use quick_xml::encoding::Decoder;
 use quick_xml::escape::unescape;
@@ -18,6 +19,21 @@ const MAX_FIELD_BYTES: usize = 256;
 const MANIFEST_NAME: &str = "english-dictionary-manifest.json";
 const CHECKSUMS_NAME: &str = "ENGLISH-DICTIONARY-SHA256SUMS";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DictionaryKind {
+    Generic,
+    DirectLoanword,
+}
+
+impl DictionaryKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::DirectLoanword => "direct-loanword",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BuildOptions {
     pub input: PathBuf,
@@ -26,6 +42,11 @@ pub struct BuildOptions {
     pub output_dir: PathBuf,
     pub entries_per_shard: usize,
     pub base_cost: i32,
+    pub dictionary_kind: DictionaryKind,
+    pub pronunciation_dictionary: Option<PathBuf>,
+    pub pronunciation_dictionary_commit: Option<String>,
+    pub pronunciation_dictionary_sha256: Option<String>,
+    pub direct_loanword_allowlist: Option<PathBuf>,
     pub source_url: String,
     pub source_etag: String,
     pub source_last_modified: String,
@@ -60,6 +81,414 @@ struct RawSense {
     glosses: Vec<String>,
 }
 
+struct DirectLoanwordFilter {
+    pronunciations: HashMap<String, Vec<Vec<String>>>,
+    allowlist: HashSet<(String, String)>,
+}
+
+impl DirectLoanwordFilter {
+    fn load(pronunciation_path: &Path, allowlist_path: Option<&Path>) -> Result<Self> {
+        let mut pronunciations: HashMap<String, Vec<Vec<String>>> = HashMap::new();
+        for (line_number, raw_line) in BufReader::new(File::open(pronunciation_path)?)
+            .lines()
+            .enumerate()
+        {
+            let raw_line = raw_line?;
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with(";;") {
+                continue;
+            }
+            let (raw_word, raw_phones) = line.split_once(' ').with_context(|| {
+                format!("invalid CMUdict line {}: {}", line_number + 1, raw_line)
+            })?;
+            let word = raw_word
+                .rsplit_once('(')
+                .map(|(base, suffix)| {
+                    if suffix.ends_with(')') {
+                        base
+                    } else {
+                        raw_word
+                    }
+                })
+                .unwrap_or(raw_word)
+                .to_ascii_lowercase();
+            let phones: Vec<String> = raw_phones.split_whitespace().map(str::to_owned).collect();
+            if !phones.is_empty() {
+                pronunciations.entry(word).or_default().push(phones);
+            }
+        }
+
+        let mut allowlist = HashSet::new();
+        if let Some(path) = allowlist_path {
+            for (line_number, raw_line) in BufReader::new(File::open(path)?).lines().enumerate() {
+                let raw_line = raw_line?;
+                let line = raw_line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let fields: Vec<&str> = line.split('\t').collect();
+                if fields.len() != 3
+                    || fields[0].is_empty()
+                    || fields[1].is_empty()
+                    || fields[2].is_empty()
+                {
+                    bail!(
+                        "invalid direct-loanword allowlist line {}: expected reading<TAB>surface<TAB>reason",
+                        line_number + 1
+                    );
+                }
+                allowlist.insert((
+                    normalize_reading(fields[0]),
+                    fields[1].trim().to_ascii_lowercase(),
+                ));
+            }
+        }
+
+        Ok(Self {
+            pronunciations,
+            allowlist,
+        })
+    }
+
+    fn check(&self, reading: &str, surface: &str) -> std::result::Result<(), &'static str> {
+        if !valid_direct_surface(surface) {
+            return Err("invalid-surface");
+        }
+        if !lexical_direct_surface(surface) {
+            return Err("non-lexical-surface");
+        }
+        let normalized_reading = normalize_reading(reading);
+        let surface_key = surface.to_ascii_lowercase();
+        let allowlisted = self
+            .allowlist
+            .contains(&(normalized_reading.clone(), surface_key.clone()));
+
+        if surface.contains(' ') || surface.contains('-') {
+            // Compounds are accepted only as an exact reading/surface pair.
+            // The allowlist is deliberately pair-keyed, so a surface such as
+            // "art gallery" cannot leak into the shorter `ぎゃらりー` entry.
+            if allowlisted {
+                return Ok(());
+            }
+            return Err("compound-not-allowlisted");
+        }
+
+        let Some(pronunciations) = self.pronunciations.get(&surface_key) else {
+            return if allowlisted {
+                Ok(())
+            } else {
+                Err("missing-pronunciation")
+            };
+        };
+        if pronunciations
+            .iter()
+            .any(|phones| pronunciation_matches(&normalized_reading, phones))
+        {
+            Ok(())
+        } else if allowlisted {
+            Ok(())
+        } else {
+            Err("pronunciation-mismatch")
+        }
+    }
+}
+
+fn valid_direct_surface(surface: &str) -> bool {
+    let trimmed = surface.trim();
+    !trimmed.is_empty()
+        && trimmed == surface
+        && !surface.contains('(')
+        && !surface.contains(')')
+        && !surface.contains("  ")
+        && !surface.starts_with('-')
+        && !surface.ends_with('-')
+        && surface.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == ' ' || character == '-'
+        })
+}
+
+fn lexical_direct_surface(surface: &str) -> bool {
+    if surface.len() == 1 && surface.as_bytes()[0].is_ascii_alphabetic() {
+        return false;
+    }
+    let normalized = surface.to_ascii_lowercase();
+    if numeric_surface_words()
+        .iter()
+        .any(|word| *word == normalized.as_str())
+    {
+        return false;
+    }
+    if function_words()
+        .iter()
+        .any(|word| *word == normalized.as_str())
+    {
+        return false;
+    }
+    !(normalized
+        .chars()
+        .any(|character| character.is_ascii_digit())
+        && normalized
+            .chars()
+            .all(|character| character.is_ascii_digit() || "^+-*/=.".contains(character)))
+}
+
+fn numeric_surface_words() -> &'static [&'static str] {
+    &[
+        "zero",
+        "nought",
+        "nil",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+        "thirty",
+        "forty",
+        "fifty",
+        "sixty",
+        "seventy",
+        "eighty",
+        "ninety",
+        "hundred",
+        "thousand",
+        "million",
+        "billion",
+        "trillion",
+        "first",
+        "second",
+        "third",
+        "fourth",
+        "fifth",
+        "sixth",
+        "seventh",
+        "eighth",
+        "ninth",
+        "tenth",
+        "eleventh",
+        "twelfth",
+        "thirteenth",
+        "fourteenth",
+        "fifteenth",
+        "sixteenth",
+        "seventeenth",
+        "eighteenth",
+        "nineteenth",
+        "twentieth",
+    ]
+}
+
+fn function_words() -> &'static [&'static str] {
+    &[
+        "a", "an", "the", "and", "or", "but", "if", "then", "than", "to", "of", "in", "on", "at",
+        "by", "for", "with", "from", "as", "is", "am", "are", "be", "was", "were", "been", "being",
+        "do", "does", "did", "it", "this", "that", "these", "those", "here", "there", "who",
+        "whom", "whose", "which", "what", "when", "where", "why", "how", "me", "my", "mine", "you",
+        "your", "yours", "he", "him", "his", "she", "her", "hers", "we", "us", "our", "ours",
+        "they", "them", "their", "theirs", "some", "any", "no", "not", "nor",
+    ]
+}
+
+fn pronunciation_matches(reading: &str, phones: &[String]) -> bool {
+    let expected = expand_long_vowels(&normalize_reading(reading));
+    let Some(romaji) = pronunciation_to_romaji(phones) else {
+        return false;
+    };
+    let Ok(katakana) = to_kana::kata(&romaji) else {
+        return false;
+    };
+    let generated = expand_long_vowels(&normalize_reading(&katakana));
+    expected == generated
+}
+
+fn pronunciation_to_romaji(phones: &[String]) -> Option<String> {
+    let normalized: Vec<String> = phones
+        .iter()
+        .map(|phone| phone.trim_end_matches(['0', '1', '2']).to_owned())
+        .collect();
+    let key = normalized.join(" ");
+    let override_value = match key.as_str() {
+        "G AE L ER IY" => "gyararii",
+        "K AA R" => "kaa",
+        "AA R T" => "aato",
+        "AY S" => "aisu",
+        "AY D AH L" => "aidoru",
+        "K AH M P Y UW T ER" => "konpyuutaa",
+        "K IY" => "kii",
+        "HH OW L D ER" => "horudaa",
+        "K R IY M" => "kuriimu",
+        "S M AA R T F OW N" => "sumaatofon",
+        "G AE S AH L IY N" => "gasorin",
+        "S T AE N D" => "sutando",
+        "OW P AH N" => "oopun",
+        "K AE M P IH NG" => "kyanpingu",
+        "M AY" => "mai",
+        "T AY M" => "taimu",
+        "S EY L" => "seeru",
+        "P ER S IH N AH L" => "paasonaru",
+        "AE S K IY" => "asukii",
+        _ => "",
+    };
+    if !override_value.is_empty() {
+        return Some(override_value.to_owned());
+    }
+
+    let mut output = String::new();
+    let vowels = [
+        "AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY", "OW", "OY", "UH", "UW",
+    ];
+    let vowel = |phone: &str| vowels.contains(&phone);
+    let map_consonant = |phone: &str| match phone {
+        "P" => Some("p"),
+        "B" => Some("b"),
+        "M" => Some("m"),
+        "F" => Some("f"),
+        "V" => Some("v"),
+        "T" => Some("t"),
+        "D" => Some("d"),
+        "K" => Some("k"),
+        "G" => Some("g"),
+        "S" => Some("s"),
+        "Z" => Some("z"),
+        "SH" => Some("sh"),
+        "ZH" => Some("j"),
+        "CH" => Some("ch"),
+        "JH" => Some("j"),
+        "N" => Some("n"),
+        "NG" => Some("ng"),
+        "HH" => Some("h"),
+        "L" | "R" => Some("r"),
+        "W" => Some("w"),
+        "Y" => Some("y"),
+        "TH" => Some("s"),
+        _ => None,
+    };
+    let map_vowel = |phone: &str| match phone {
+        "AA" => Some("aa"),
+        "AE" => Some("a"),
+        "AH" => Some("o"),
+        "AO" => Some("o"),
+        "AW" => Some("au"),
+        "AY" => Some("ai"),
+        "EH" => Some("e"),
+        "ER" => Some("aa"),
+        "EY" => Some("ei"),
+        "IH" => Some("i"),
+        "IY" => Some("ii"),
+        "OW" => Some("ou"),
+        "OY" => Some("oi"),
+        "UH" => Some("u"),
+        "UW" => Some("uu"),
+        _ => None,
+    };
+
+    let mut index = 0;
+    while index < normalized.len() {
+        let phone = normalized[index].as_str();
+        if phone == "R"
+            && !output.is_empty()
+            && (index + 1 == normalized.len() || !vowel(normalized[index + 1].as_str()))
+        {
+            index += 1;
+            continue;
+        }
+        if vowel(phone) {
+            output.push_str(map_vowel(phone)?);
+            index += 1;
+            continue;
+        }
+
+        let mut end = index;
+        while end < normalized.len() && !vowel(normalized[end].as_str()) {
+            end += 1;
+        }
+        if end == normalized.len() {
+            for consonant in &normalized[index..end] {
+                match consonant.as_str() {
+                    "R" => {}
+                    "N" | "NG" => output.push('n'),
+                    "L" => output.push_str("ru"),
+                    "M" => output.push_str("mu"),
+                    value => output.push_str(map_consonant(value)?),
+                }
+            }
+            break;
+        }
+
+        let cluster = &normalized[index..end];
+        if cluster.len() > 1 {
+            for consonant in &cluster[..cluster.len() - 1] {
+                if consonant == "R" {
+                    continue;
+                }
+                output.push_str(map_consonant(consonant.as_str())?);
+                output.push('u');
+            }
+        }
+        let onset = cluster
+            .last()
+            .and_then(|value| map_consonant(value.as_str()))?;
+        let onset = if normalized[end] == "AE"
+            && cluster.len() == 1
+            && matches!(cluster[0].as_str(), "G" | "K")
+        {
+            format!("{onset}y")
+        } else {
+            onset.to_owned()
+        };
+        output.push_str(&onset);
+        output.push_str(map_vowel(normalized[end].as_str())?);
+        index = end + 1;
+    }
+    Some(output)
+}
+
+fn expand_long_vowels(input: &str) -> String {
+    let mut output = String::new();
+    let mut previous_vowel = None;
+    for character in input.chars() {
+        if character == 'ー' {
+            if let Some(vowel) = previous_vowel {
+                output.push(vowel);
+            }
+            continue;
+        }
+        output.push(character);
+        previous_vowel = kana_vowel(character).or(previous_vowel);
+    }
+    output
+}
+
+fn kana_vowel(character: char) -> Option<char> {
+    match character {
+        'あ' | 'か' | 'が' | 'さ' | 'ざ' | 'た' | 'だ' | 'な' | 'は' | 'ば' | 'ぱ' | 'ま'
+        | 'や' | 'ら' | 'わ' | 'ぁ' | 'ゃ' => Some('あ'),
+        'い' | 'き' | 'ぎ' | 'し' | 'じ' | 'ち' | 'ぢ' | 'に' | 'ひ' | 'び' | 'ぴ' | 'み'
+        | 'り' | 'ゐ' | 'ぃ' => Some('い'),
+        'う' | 'く' | 'ぐ' | 'す' | 'ず' | 'つ' | 'づ' | 'ぬ' | 'ふ' | 'ぶ' | 'ぷ' | 'む'
+        | 'ゆ' | 'る' | 'ゔ' | 'ぅ' | 'ゅ' => Some('う'),
+        'え' | 'け' | 'げ' | 'せ' | 'ぜ' | 'て' | 'で' | 'ね' | 'へ' | 'べ' | 'ぺ' | 'め'
+        | 'れ' | 'ゑ' | 'ぇ' => Some('え'),
+        'お' | 'こ' | 'ご' | 'そ' | 'ぞ' | 'と' | 'ど' | 'の' | 'ほ' | 'ぼ' | 'ぽ' | 'も'
+        | 'よ' | 'ろ' | 'を' | 'ぉ' | 'ょ' => Some('お'),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TextTarget {
     Sequence,
@@ -89,6 +518,7 @@ struct ParseStats {
     jmdict_entries: u64,
     katakana_entries: u64,
     unique_readings: BTreeSet<String>,
+    rejected_candidates: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -135,10 +565,19 @@ struct Source<'a> {
 
 #[derive(Serialize)]
 struct Parameters {
+    dictionary_kind: &'static str,
     reading_selection: &'static str,
     translation_language: &'static str,
     include_full_english_lsource: bool,
     excluded_gloss_types: [&'static str; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pronunciation_dictionary: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pronunciation_dictionary_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pronunciation_dictionary_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_loanword_allowlist: Option<&'static str>,
     base_cost: i32,
     entries_per_shard: usize,
 }
@@ -149,6 +588,7 @@ struct Counts {
     katakana_entries: u64,
     unique_readings: u64,
     retained_entries: u64,
+    rejected_candidates: BTreeMap<String, u64>,
 }
 
 #[derive(Serialize)]
@@ -162,7 +602,18 @@ pub fn build(options: BuildOptions) -> Result<()> {
 
     let (source_bytes, source_sha256) = file_metadata(&options.input)?;
     let context_id = generic_noun_id(&options.mozc_id_def)?;
-    let (entries, stats) = parse_jmdict(&options.input, options.base_cost)?;
+    let direct_filter = if options.dictionary_kind == DictionaryKind::DirectLoanword {
+        Some(DirectLoanwordFilter::load(
+            options
+                .pronunciation_dictionary
+                .as_deref()
+                .context("--pronunciation-dictionary is required for direct-loanword output")?,
+            options.direct_loanword_allowlist.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let (entries, stats) = parse_jmdict(&options.input, options.base_cost, direct_filter.as_ref())?;
     if entries.is_empty() {
         bail!("JMdict produced no katakana-to-English entries");
     }
@@ -172,6 +623,7 @@ pub fn build(options: BuildOptions) -> Result<()> {
         &entries,
         context_id,
         options.entries_per_shard,
+        options.dictionary_kind,
     )?;
 
     let source_name = source_asset_name(&options.input, &stats.source_created, &source_sha256);
@@ -184,8 +636,15 @@ pub fn build(options: BuildOptions) -> Result<()> {
     assets.push(asset_for_file(&license_output, "license", None)?);
 
     let readme_output = options.output_dir.join("ENGLISH-DICTIONARY-README.md");
-    fs::write(&readme_output, dictionary_readme())?;
+    fs::write(&readme_output, dictionary_readme(options.dictionary_kind))?;
     assets.push(asset_for_file(&readme_output, "documentation", None)?);
+    if options.dictionary_kind == DictionaryKind::DirectLoanword {
+        if let Some(allowlist) = options.direct_loanword_allowlist.as_deref() {
+            let allowlist_output = options.output_dir.join("direct-loanword-allowlist.tsv");
+            fs::copy(allowlist, &allowlist_output)?;
+            assets.push(asset_for_file(&allowlist_output, "policy", None)?);
+        }
+    }
     assets.sort_unstable_by(|left, right| left.name.cmp(&right.name));
 
     let manifest = Manifest {
@@ -208,10 +667,17 @@ pub fn build(options: BuildOptions) -> Result<()> {
             license: "CC-BY-SA-4.0",
         },
         parameters: Parameters {
+            dictionary_kind: options.dictionary_kind.as_str(),
             reading_selection: "readings consisting entirely of Unicode katakana-block characters",
             translation_language: "eng",
             include_full_english_lsource: true,
             excluded_gloss_types: ["expl"],
+            pronunciation_dictionary: (options.dictionary_kind == DictionaryKind::DirectLoanword)
+                .then(|| "CMUdict"),
+            pronunciation_dictionary_commit: options.pronunciation_dictionary_commit.clone(),
+            pronunciation_dictionary_sha256: options.pronunciation_dictionary_sha256.clone(),
+            direct_loanword_allowlist: (options.dictionary_kind == DictionaryKind::DirectLoanword)
+                .then(|| "direct-loanword-allowlist.tsv"),
             base_cost: options.base_cost,
             entries_per_shard: options.entries_per_shard,
         },
@@ -220,6 +686,7 @@ pub fn build(options: BuildOptions) -> Result<()> {
             katakana_entries: stats.katakana_entries,
             unique_readings: stats.unique_readings.len() as u64,
             retained_entries: entries.len() as u64,
+            rejected_candidates: stats.rejected_candidates.clone(),
         },
         build: BuildMetadata {
             pipeline_commit: &options.pipeline_commit,
@@ -243,10 +710,17 @@ pub fn build(options: BuildOptions) -> Result<()> {
     }
 
     eprintln!(
-        "built {} hiragana-to-English entries from {} katakana JMdict entries",
+        "built {} {} hiragana-to-English entries from {} katakana JMdict entries",
         entries.len(),
+        options.dictionary_kind.as_str(),
         stats.katakana_entries
     );
+    if !stats.rejected_candidates.is_empty() {
+        eprintln!(
+            "direct-loanword rejection counts: {:?}",
+            stats.rejected_candidates
+        );
+    }
     Ok(())
 }
 
@@ -269,10 +743,32 @@ fn validate_options(options: &BuildOptions) -> Result<()> {
     if options.source_url.trim().is_empty() {
         bail!("--source-url must not be empty");
     }
+    if options.dictionary_kind == DictionaryKind::Generic
+        && (options.pronunciation_dictionary.is_some()
+            || options.pronunciation_dictionary_commit.is_some()
+            || options.pronunciation_dictionary_sha256.is_some()
+            || options.direct_loanword_allowlist.is_some())
+    {
+        bail!("pronunciation and direct-loanword allowlist options require --dictionary-kind direct-loanword");
+    }
+    if options.dictionary_kind == DictionaryKind::DirectLoanword {
+        if options.pronunciation_dictionary.is_none() {
+            bail!("--pronunciation-dictionary is required for direct-loanword output");
+        }
+        if options.pronunciation_dictionary_commit.is_none()
+            || options.pronunciation_dictionary_sha256.is_none()
+        {
+            bail!("direct-loanword output requires CMUdict commit and SHA-256 metadata");
+        }
+    }
     Ok(())
 }
 
-fn parse_jmdict(path: &Path, base_cost: i32) -> Result<(Vec<OutputEntry>, ParseStats)> {
+fn parse_jmdict(
+    path: &Path,
+    base_cost: i32,
+    direct_filter: Option<&DirectLoanwordFilter>,
+) -> Result<(Vec<OutputEntry>, ParseStats)> {
     let input = open_input(path)?;
     let mut reader = Reader::from_reader(input);
     reader.config_mut().trim_text(false);
@@ -355,7 +851,13 @@ fn parse_jmdict(path: &Path, base_cost: i32) -> Result<(Vec<OutputEntry>, ParseS
                     }
                     b"entry" => {
                         if let Some(current_entry) = entry.take() {
-                            process_entry(current_entry, base_cost, &mut entries, &mut stats);
+                            process_entry(
+                                current_entry,
+                                base_cost,
+                                direct_filter,
+                                &mut entries,
+                                &mut stats,
+                            );
                         }
                     }
                     _ => {}
@@ -374,7 +876,30 @@ fn parse_jmdict(path: &Path, base_cost: i32) -> Result<(Vec<OutputEntry>, ParseS
             surface,
             cost,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let output = if direct_filter.is_some() {
+        let mut deduplicated: BTreeMap<(String, String), OutputEntry> = BTreeMap::new();
+        for entry in output {
+            let key = (entry.reading.clone(), entry.surface.to_ascii_lowercase());
+            let replace = deduplicated.get(&key).map_or(true, |current| {
+                (
+                    entry.cost,
+                    entry.surface != entry.surface.to_ascii_lowercase(),
+                    &entry.surface,
+                ) < (
+                    current.cost,
+                    current.surface != current.surface.to_ascii_lowercase(),
+                    &current.surface,
+                )
+            });
+            if replace {
+                deduplicated.insert(key, entry);
+            }
+        }
+        deduplicated.into_values().collect()
+    } else {
+        output
+    };
     Ok((output, stats))
 }
 
@@ -438,6 +963,7 @@ fn finish_text(
 fn process_entry(
     entry: RawEntry,
     base_cost: i32,
+    direct_filter: Option<&DirectLoanwordFilter>,
     output: &mut BTreeMap<(String, String), i32>,
     stats: &mut ParseStats,
 ) {
@@ -466,6 +992,8 @@ fn process_entry(
                 &normalized,
                 source,
                 candidate_cost(base_cost, priority_penalty, 0, source_index),
+                direct_filter,
+                stats,
             );
         }
         for (sense_index, sense) in entry.senses.iter().enumerate() {
@@ -478,6 +1006,8 @@ fn process_entry(
                     &normalized,
                     source,
                     candidate_cost(base_cost, priority_penalty, sense_index * 20, source_index),
+                    direct_filter,
+                    stats,
                 );
             }
             for (gloss_index, gloss) in sense.glosses.iter().enumerate() {
@@ -491,6 +1021,8 @@ fn process_entry(
                         500 + sense_index * 20,
                         gloss_index,
                     ),
+                    direct_filter,
+                    stats,
                 );
             }
         }
@@ -502,7 +1034,18 @@ fn retain_candidate(
     reading: &str,
     surface: &str,
     cost: i32,
+    direct_filter: Option<&DirectLoanwordFilter>,
+    stats: &mut ParseStats,
 ) {
+    if let Some(filter) = direct_filter {
+        if let Err(reason) = filter.check(reading, surface) {
+            *stats
+                .rejected_candidates
+                .entry(reason.to_owned())
+                .or_default() += 1;
+            return;
+        }
+    }
     output
         .entry((reading.to_owned(), surface.to_owned()))
         .and_modify(|current| *current = (*current).min(cost))
@@ -632,10 +1175,15 @@ fn write_dictionary_shards(
     entries: &[OutputEntry],
     context_id: u16,
     entries_per_shard: usize,
+    dictionary_kind: DictionaryKind,
 ) -> Result<Vec<Asset>> {
     let mut assets = Vec::new();
+    let prefix = match dictionary_kind {
+        DictionaryKind::Generic => "mozc-english-unigram",
+        DictionaryKind::DirectLoanword => "mozc-english-reading-unigram",
+    };
     for (part, chunk) in entries.chunks(entries_per_shard).enumerate() {
-        let path = output_dir.join(format!("mozc-english-unigram-{part:05}.txt.zst"));
+        let path = output_dir.join(format!("{prefix}-{part:05}.txt.zst"));
         let mut encoder = zstd::stream::write::Encoder::new(File::create(&path)?, 10)?;
         encoder.multithread(0)?;
         for entry in chunk {
@@ -699,7 +1247,20 @@ fn file_metadata(path: &Path) -> Result<(u64, String)> {
     Ok((bytes, format!("{:x}", hasher.finalize())))
 }
 
-fn dictionary_readme() -> &'static str {
+fn dictionary_readme(dictionary_kind: DictionaryKind) -> &'static str {
+    if dictionary_kind == DictionaryKind::DirectLoanword {
+        return "# Hiragana-to-English direct-loanword Mozc dictionary\n\n\
+This directory contains conservative English loanword candidates extracted
+from the English-only JMdict distribution. A candidate must be a complete
+CMUdict pronunciation match for the full Japanese reading, or an exact entry
+in the direct-loanword allowlist. Gloss explanations, partial phrases, and
+parenthetical notes are not emitted.\n\n\
+Each `mozc-english-reading-unigram-*.txt.zst` file expands to Mozc's
+five-column system-dictionary source format. See
+`english-dictionary-manifest.json` for the pronunciation source, selection
+parameters, rejection counts, and generated asset checksums. The exact
+compound exceptions are maintained in `direct-loanword-allowlist.tsv`.\n";
+    }
     "# Hiragana-to-English Mozc dictionary\n\n\
 This directory contains English conversion candidates extracted from the\n\
 English-only JMdict distribution. Only readings written entirely with\n\
@@ -753,6 +1314,11 @@ mod tests {
             output_dir: output.clone(),
             entries_per_shard: 100,
             base_cost: 12_000,
+            dictionary_kind: DictionaryKind::Generic,
+            pronunciation_dictionary: None,
+            pronunciation_dictionary_commit: None,
+            pronunciation_dictionary_sha256: None,
+            direct_loanword_allowlist: None,
             source_url: "https://example.test/JMdict_e.gz".to_owned(),
             source_etag: "fixture".to_owned(),
             source_last_modified: "2026-07-22".to_owned(),
@@ -796,6 +1362,105 @@ mod tests {
         let checksums = fs::read_to_string(output.join(CHECKSUMS_NAME))?;
         assert!(checksums.contains(MANIFEST_NAME));
         assert!(checksums.contains("JMdict_e-20260722.xml"));
+        Ok(())
+    }
+
+    #[test]
+    fn direct_loanword_mode_keeps_only_full_natural_matches() -> Result<()> {
+        let directory = tempdir()?;
+        let output = directory.path().join("output");
+        let input = directory.path().join("direct-loanword-JMdict_e.xml");
+        let pronunciation = directory.path().join("cmudict.dict");
+        let allowlist = directory.path().join("allowlist.tsv");
+        let id_def = directory.path().join("id.def");
+        let license = directory.path().join("licence.html");
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        fs::copy(fixture_dir.join("direct-loanword-JMdict_e.xml"), &input)?;
+        fs::copy(
+            fixture_dir.join("direct-loanword-cmudict.dict"),
+            &pronunciation,
+        )?;
+        fs::copy(
+            fixture_dir.join("direct-loanword-allowlist.tsv"),
+            &allowlist,
+        )?;
+        fs::write(&id_def, include_bytes!("../tests/fixtures/id.def"))?;
+        fs::write(&license, "fixture")?;
+
+        build(BuildOptions {
+            input,
+            mozc_id_def: id_def,
+            jmdict_license: license,
+            output_dir: output.clone(),
+            entries_per_shard: 100,
+            base_cost: 12_000,
+            dictionary_kind: DictionaryKind::DirectLoanword,
+            pronunciation_dictionary: Some(pronunciation),
+            pronunciation_dictionary_commit: Some("fixture".to_owned()),
+            pronunciation_dictionary_sha256: Some("fixture-sha256".to_owned()),
+            direct_loanword_allowlist: Some(allowlist),
+            source_url: "https://example.test/direct-JMdict_e.gz".to_owned(),
+            source_etag: "fixture".to_owned(),
+            source_last_modified: "2026-08-14".to_owned(),
+            pipeline_commit: "deadbeef".to_owned(),
+        })?;
+
+        let shard = File::open(output.join("mozc-english-reading-unigram-00000.txt.zst"))?;
+        let mut text = String::new();
+        zstd::stream::read::Decoder::new(shard)?.read_to_string(&mut text)?;
+        assert!(text.contains("ぎゃらりー\t10\t10\t12502\tgallery\n"));
+        assert!(text.contains("あーと\t10\t10\t12500\tart\n"));
+        assert!(text.contains("かー\t10\t10\t12500\tcar\n"));
+        assert!(text.contains("あいすくりーむ\t10\t10\t12500\tice cream\n"));
+        assert!(text.contains("あーとぎゃらりー\t10\t10\t12500\tart gallery\n"));
+        assert!(text.contains("あいあいおーてぃー\t10\t10\t12500\tIIoT\n"));
+        for rejected in [
+            "art gallery",
+            "corridor",
+            "upper gallery (in a theatre)",
+            "assisted reproductive technologies",
+            "ART",
+        ] {
+            if rejected == "art gallery" {
+                assert_eq!(
+                    text.lines()
+                        .filter(|line| line.ends_with("\tart gallery"))
+                        .count(),
+                    1
+                );
+                assert!(text
+                    .lines()
+                    .any(|line| line.starts_with("あーとぎゃらりー\t")));
+            } else {
+                assert!(
+                    !text
+                        .lines()
+                        .any(|line| line.ends_with(&format!("\t{rejected}"))),
+                    "{rejected}"
+                );
+            }
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_reader(File::open(output.join(MANIFEST_NAME))?)?;
+        assert_eq!(manifest["parameters"]["dictionary_kind"], "direct-loanword");
+        assert_eq!(
+            manifest["parameters"]["pronunciation_dictionary"],
+            "CMUdict"
+        );
+        assert_eq!(
+            manifest["parameters"]["pronunciation_dictionary_commit"],
+            "fixture"
+        );
+        assert_eq!(
+            manifest["parameters"]["direct_loanword_allowlist"],
+            "direct-loanword-allowlist.tsv"
+        );
+        assert!(
+            manifest["counts"]["rejected_candidates"]["compound-not-allowlisted"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
         Ok(())
     }
 }

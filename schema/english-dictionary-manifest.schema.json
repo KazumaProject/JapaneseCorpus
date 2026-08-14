@@ -44,7 +44,17 @@
         "excluded_gloss_types",
         "base_cost",
         "entries_per_shard"
-      ]
+      ],
+      "properties": {
+        "dictionary_kind": { "enum": ["generic", "direct-loanword"] },
+        "pronunciation_dictionary": { "type": "string" },
+        "pronunciation_dictionary_commit": { "type": "string" },
+        "pronunciation_dictionary_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "direct_loanword_allowlist": { "type": "string" }
+      }
     },
     "counts": {
       "type": "object",
@@ -53,7 +63,13 @@
         "katakana_entries",
         "unique_readings",
         "retained_entries"
-      ]
+      ],
+      "properties": {
+        "rejected_candidates": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
     },
     "build": {
       "type": "object",

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use japanese_corpus_jmdict::{build, BuildOptions};
+use japanese_corpus_jmdict::{build, BuildOptions, DictionaryKind};
 
 #[derive(Debug, Parser)]
 #[command(about = "Build hiragana-to-English Mozc dictionaries from JMdict")]
@@ -36,6 +36,27 @@ enum Command {
         #[arg(long, default_value_t = 12_000)]
         base_cost: i32,
 
+        /// Output policy. `generic` preserves all English glosses; `direct-loanword`
+        /// keeps only complete, pronunciation-matched loanword candidates.
+        #[arg(long, value_enum, default_value_t = DictionaryKind::Generic)]
+        dictionary_kind: DictionaryKind,
+
+        /// Pinned CMUdict file used by the direct-loanword policy.
+        #[arg(long)]
+        pronunciation_dictionary: Option<PathBuf>,
+
+        /// Immutable CMUdict revision recorded in the manifest.
+        #[arg(long)]
+        pronunciation_dictionary_commit: Option<String>,
+
+        /// SHA-256 of the downloaded CMUdict file recorded in the manifest.
+        #[arg(long)]
+        pronunciation_dictionary_sha256: Option<String>,
+
+        /// Exact reading/surface exceptions for candidates absent from CMUdict.
+        #[arg(long)]
+        direct_loanword_allowlist: Option<PathBuf>,
+
         #[arg(long)]
         source_url: String,
 
@@ -59,6 +80,11 @@ fn main() -> Result<()> {
             output_dir,
             entries_per_shard,
             base_cost,
+            dictionary_kind,
+            pronunciation_dictionary,
+            pronunciation_dictionary_commit,
+            pronunciation_dictionary_sha256,
+            direct_loanword_allowlist,
             source_url,
             source_etag,
             source_last_modified,
@@ -70,6 +96,11 @@ fn main() -> Result<()> {
             output_dir,
             entries_per_shard,
             base_cost,
+            dictionary_kind,
+            pronunciation_dictionary,
+            pronunciation_dictionary_commit,
+            pronunciation_dictionary_sha256,
+            direct_loanword_allowlist,
             source_url,
             source_etag,
             source_last_modified,
