@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JMdict created: 2026-08-14 -->
+<!DOCTYPE JMdict [
+<!ENTITY n "noun (common) (futsuumeishi)">
+]>
+<JMdict>
+  <entry>
+    <ent_seq>9100001</ent_seq>
+    <r_ele><reb>ギャラリー</reb><re_pri>gai1</re_pri></r_ele>
+    <sense>
+      <pos>&n;</pos>
+      <gloss xml:lang="eng">art gallery</gloss>
+      <gloss xml:lang="eng">corridor</gloss>
+      <gloss xml:lang="eng">gallery</gloss>
+      <gloss xml:lang="eng">upper gallery (in a theatre)</gloss>
+    </sense>
+  </entry>
+  <entry>
+    <ent_seq>9100002</ent_seq>
+    <r_ele><reb>アート</reb><re_pri>gai1</re_pri></r_ele>
+    <sense><gloss xml:lang="eng">art</gloss><gloss xml:lang="eng">ART</gloss><gloss xml:lang="eng">assisted reproductive technologies</gloss></sense>
+  </entry>
+  <entry>
+    <ent_seq>9100003</ent_seq>
+    <r_ele><reb>カー</reb><re_pri>gai1</re_pri></r_ele>
+    <sense><gloss xml:lang="eng">car</gloss></sense>
+  </entry>
+  <entry>
+    <ent_seq>9100004</ent_seq>
+    <r_ele><reb>アイスクリーム</reb><re_pri>gai1</re_pri></r_ele>
+    <sense><gloss xml:lang="eng">ice cream</gloss></sense>
+  </entry>
+  <entry>
+    <ent_seq>9100005</ent_seq>
+    <r_ele><reb>アートギャラリー</reb><re_pri>gai1</re_pri></r_ele>
+    <sense><gloss xml:lang="eng">art gallery</gloss></sense>
+  </entry>
+  <entry>
+    <ent_seq>9100006</ent_seq>
+    <r_ele><reb>アイアイオーティー</reb><re_pri>gai1</re_pri></r_ele>
+    <sense><gloss xml:lang="eng">IIoT</gloss></sense>
+  </entry>
+</JMdict>

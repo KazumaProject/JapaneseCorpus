@@ -1,0 +1,7 @@
+# Exact direct-loanword exceptions for CMUdict entries that are absent or
+# represented with a spelling variant.  Keep the key pair exact; wildcards
+# are intentionally unsupported.
+あいすくりーむ	ice cream	natural compound loanword
+あーとぎゃらりー	art gallery	natural compound loanword
+きーほるだー	key holder	natural compound loanword
+あいあいおーてぃー	IIoT	acronym loanword

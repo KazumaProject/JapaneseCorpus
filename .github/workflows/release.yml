@@ -36,6 +36,8 @@ env:
   VIBRATO_IPADIC_ARCHIVE_SHA256: 4764f983b7c3a9e1cb6a5ee945e00558efd812980e0dad61224f63ee3b0475d9
   AJIMEE_COMMIT: 401666cd56d1a570c2021798b64b6da4396bfd45
   AJIMEE_DATA_SHA256: e9eb668fd6aa14b1e26436f429b5550108af0a1dfd443b8cea0bcb3ab3028fca
+  CMUDICT_COMMIT: 74790861f652b15e4ac49015a90074ad62a27690
+  CMUDICT_SHA256: 81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22
 
 jobs:
   prepare:
@@ -417,6 +419,10 @@ jobs:
           curl --fail --location --retry 5 --retry-all-errors \
             --output "$RUNNER_TEMP/JMDICT-LICENSE.html" \
             https://www.edrdg.org/edrdg/licence.html
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/cmudict.dict" \
+            "https://raw.githubusercontent.com/cmusphinx/cmudict/$CMUDICT_COMMIT/cmudict.dict"
+          echo "$CMUDICT_SHA256  $RUNNER_TEMP/cmudict.dict" | sha256sum --check
       - name: Build and test hiragana-to-English dictionary
         run: |
           set -euo pipefail
@@ -434,6 +440,11 @@ jobs:
             --output-dir "$OUTPUT" \
             --entries-per-shard 1000000 \
             --base-cost 12000 \
+            --dictionary-kind direct-loanword \
+            --pronunciation-dictionary "$RUNNER_TEMP/cmudict.dict" \
+            --pronunciation-dictionary-commit "$CMUDICT_COMMIT" \
+            --pronunciation-dictionary-sha256 "$CMUDICT_SHA256" \
+            --direct-loanword-allowlist jmdict-builder/data/direct-loanword-allowlist.tsv \
             --source-url "$JMDICT_URL" \
             --source-etag "$JMDICT_ETAG" \
             --source-last-modified "$JMDICT_LAST_MODIFIED" \
@@ -447,19 +458,26 @@ jobs:
                 print "invalid numeric Mozc field at line " NR > "/dev/stderr"; exit 1
               }
             '
-          done < <(find "$OUTPUT" -maxdepth 1 -type f -name 'mozc-english-unigram-*.txt.zst' -print0 | sort -z)
-          jq -e '.counts.retained_entries > 100000 and .counts.unique_readings > 60000' \
+          done < <(find "$OUTPUT" -maxdepth 1 -type f -name 'mozc-english-reading-unigram-*.txt.zst' -print0 | sort -z)
+          jq -e '.parameters.dictionary_kind == "direct-loanword" and .counts.retained_entries > 500 and .counts.unique_readings > 500' \
             "$OUTPUT/english-dictionary-manifest.json" >/dev/null
           (cd "$OUTPUT" && sha256sum --check ENGLISH-DICTIONARY-SHA256SUMS)
 
           COMPUTER=$(cargo run --quiet --release --locked \
             --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
-            --dictionary "$OUTPUT" --candidates 10 こんぴゅーた)
+            --dictionary "$OUTPUT" --candidates 10 こんぴゅーたー)
           ART=$(cargo run --quiet --release --locked \
             --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
             --dictionary "$OUTPUT" --candidates 10 あーと)
+          GALLERY=$(cargo run --quiet --release --locked \
+            --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
+            --dictionary "$OUTPUT" --candidates 10 ぎゃらりー)
           grep -q $'\tcomputer$' <<<"$COMPUTER"
           grep -q $'\tart$' <<<"$ART"
+          ! grep -q $'\tassisted reproductive technologies$' <<<"$ART"
+          grep -q $'\tgallery$' <<<"$GALLERY"
+          ! grep -q $'\tart gallery$' <<<"$GALLERY"
+          ! grep -q $'\tcorridor$' <<<"$GALLERY"
       - name: Upload English dictionary assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -487,7 +505,7 @@ jobs:
           path: |
             ${{ runner.temp }}/english-output/english-dictionary-manifest.json
             ${{ runner.temp }}/english-output/ENGLISH-DICTIONARY-SHA256SUMS
-            ${{ runner.temp }}/english-output/mozc-english-unigram-*.txt.zst
+            ${{ runner.temp }}/english-output/mozc-english-reading-unigram-*.txt.zst
           retention-days: 1
 
   finalize:
