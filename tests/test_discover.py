@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 
-from japanese_corpus.discover import discover_jmdict, discover_wikipedia
+from japanese_corpus.discover import discover_aozora, discover_jmdict, discover_wikipedia
 
 
 class DiscoverWikipediaTest(unittest.TestCase):
@@ -49,6 +50,22 @@ class DiscoverJmdictTest(unittest.TestCase):
     def test_requires_a_version_header(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no ETag or Last-Modified"):
             discover_jmdict("https://example.test/JMdict_e.gz", lambda _: {})
+
+
+class DiscoverAozoraTest(unittest.TestCase):
+    def test_uses_metadata_digest_as_source_version(self) -> None:
+        metadata = b"official metadata fixture"
+
+        result = discover_aozora(
+            "https://example.test/aozora/",
+            "https://example.test/metadata.zip",
+            lambda _: metadata,
+        )
+
+        expected = hashlib.sha256(metadata).hexdigest()
+        self.assertEqual(result["source_url"], "https://example.test/aozora/")
+        self.assertEqual(result["source_version"], expected)
+        self.assertEqual(result["metadata_sha256"], expected)
 
 
 if __name__ == "__main__":

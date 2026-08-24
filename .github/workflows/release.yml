@@ -46,7 +46,7 @@ jobs:
       should_build: ${{ steps.prepare.outputs.should_build }}
       matrix: ${{ steps.prepare.outputs.matrix }}
       dump_date: ${{ steps.prepare.outputs.dump_date }}
-      aozora_commit: ${{ steps.prepare.outputs.aozora_commit }}
+      aozora_version: ${{ steps.prepare.outputs.aozora_version }}
       version: ${{ steps.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +64,7 @@ jobs:
           PYTHONPATH=src python -m japanese_corpus discover --output "$DISCOVERY"
 
           DUMP_DATE=$(jq -r '.wikipedia.dump_date' "$DISCOVERY")
-          AOZORA_COMMIT=$(jq -r '.aozora.repository_commit' "$DISCOVERY")
+          AOZORA_VERSION=$(jq -r '.aozora.source_version' "$DISCOVERY")
           JMDICT_ETAG=$(jq -r '.jmdict.etag' "$DISCOVERY")
           VERSION="v$(date -u +%Y.%m%d).${GITHUB_RUN_NUMBER}"
           SHOULD_BUILD=true
@@ -72,10 +72,10 @@ jobs:
           PREVIOUS="$RUNNER_TEMP/previous-manifest.json"
           if gh release download --pattern manifest.json --output "$PREVIOUS" 2>/dev/null; then
             PREVIOUS_DUMP=$(jq -r '.sources.wikipedia.dump_date // ""' "$PREVIOUS")
-            PREVIOUS_AOZORA=$(jq -r '.sources.aozora_bunko.repository_commit // ""' "$PREVIOUS")
+            PREVIOUS_AOZORA=$(jq -r '.sources.aozora_bunko.source_version // .sources.aozora_bunko.repository_commit // ""' "$PREVIOUS")
             PREVIOUS_JMDICT=$(jq -r '.sources.jmdict.etag // ""' "$PREVIOUS")
             PREVIOUS_PIPELINE=$(jq -r '.release.pipeline_commit // ""' "$PREVIOUS")
-            if [[ "$FORCE_BUILD" != "true" && "$PREVIOUS_DUMP" == "$DUMP_DATE" && "$PREVIOUS_AOZORA" == "$AOZORA_COMMIT" && "$PREVIOUS_JMDICT" == "$JMDICT_ETAG" && "$PREVIOUS_PIPELINE" == "$GITHUB_SHA" ]]; then
+            if [[ "$FORCE_BUILD" != "true" && "$PREVIOUS_DUMP" == "$DUMP_DATE" && "$PREVIOUS_AOZORA" == "$AOZORA_VERSION" && "$PREVIOUS_JMDICT" == "$JMDICT_ETAG" && "$PREVIOUS_PIPELINE" == "$GITHUB_SHA" ]]; then
               SHOULD_BUILD=false
             fi
           fi
@@ -83,7 +83,7 @@ jobs:
           echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
           echo "matrix=$(jq -c '.wikipedia.shards' "$DISCOVERY")" >> "$GITHUB_OUTPUT"
           echo "dump_date=$DUMP_DATE" >> "$GITHUB_OUTPUT"
-          echo "aozora_commit=$AOZORA_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "aozora_version=$AOZORA_VERSION" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           if [[ "$SHOULD_BUILD" != "true" ]]; then
@@ -169,39 +169,51 @@ jobs:
         run: command -v zstd || { sudo apt-get update && sudo apt-get install -y zstd; }
       - name: Fetch Aozora Bunko sources
         env:
-          AOZORA_COMMIT: ${{ needs.prepare.outputs.aozora_commit }}
+          AOZORA_VERSION: ${{ needs.prepare.outputs.aozora_version }}
         run: |
           set -euo pipefail
           curl --fail --location --retry 5 --retry-all-errors \
             --output "$RUNNER_TEMP/aozora-metadata.zip" \
             https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip
+          echo "$AOZORA_VERSION  $RUNNER_TEMP/aozora-metadata.zip" | sha256sum --check
           PYTHONPATH=src python -m japanese_corpus list-aozora-paths \
             --metadata-zip "$RUNNER_TEMP/aozora-metadata.zip" \
             --output "$RUNNER_TEMP/aozora-paths.txt"
 
           SOURCE="$RUNNER_TEMP/aozorabunko"
-          git init "$SOURCE"
-          git -C "$SOURCE" remote add origin https://github.com/aozorabunko/aozorabunko.git
-          git -C "$SOURCE" sparse-checkout init --no-cone
-          git -C "$SOURCE" sparse-checkout set --no-cone --stdin < "$RUNNER_TEMP/aozora-paths.txt"
-          git -C "$SOURCE" fetch --depth=1 --filter=blob:none origin "$AOZORA_COMMIT"
-          git -C "$SOURCE" checkout --detach FETCH_HEAD
+          mkdir -p "$SOURCE"
+          download_source() {
+            local relative_path="$1"
+            [[ "$relative_path" == cards/* && "$relative_path" != *..* ]] || {
+              echo "Unexpected Aozora source path: $relative_path" >&2
+              return 1
+            }
+            local destination="$SOURCE/$relative_path"
+            mkdir -p "$(dirname "$destination")"
+            curl --fail --location --retry 5 --retry-all-errors --retry-delay 1 \
+              --output "$destination" \
+              "https://www.aozora.gr.jp/$relative_path"
+          }
+          export SOURCE
+          export -f download_source
+          xargs --no-run-if-empty --delimiter '\n' --max-args 1 --max-procs 8 \
+            bash -c 'download_source "$1"' _ < "$RUNNER_TEMP/aozora-paths.txt"
       - name: Build and upload Aozora Bunko corpus
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.version }}
-          AOZORA_COMMIT: ${{ needs.prepare.outputs.aozora_commit }}
+          AOZORA_VERSION: ${{ needs.prepare.outputs.aozora_version }}
         run: |
           set -euo pipefail
-          SHORT_COMMIT=${AOZORA_COMMIT:0:12}
-          OUTPUT="$RUNNER_TEMP/aozora-${SHORT_COMMIT}.jsonl.zst"
+          SHORT_VERSION=${AOZORA_VERSION:0:12}
+          OUTPUT="$RUNNER_TEMP/aozora-${SHORT_VERSION}.jsonl.zst"
           STATS="$RUNNER_TEMP/aozora.stats.json"
           PYTHONPATH=src python -m japanese_corpus build-aozora \
             --metadata-zip "$RUNNER_TEMP/aozora-metadata.zip" \
             --source-root "$RUNNER_TEMP/aozorabunko" \
             --output "$OUTPUT" \
             --stats "$STATS" \
-            --source-commit "$AOZORA_COMMIT"
+            --source-commit "$AOZORA_VERSION"
           zstd --test "$OUTPUT"
           gh release upload "$RELEASE_TAG" "$OUTPUT"
       - name: Save Aozora Bunko statistics
@@ -515,7 +527,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.version }}
           DUMP_DATE: ${{ needs.prepare.outputs.dump_date }}
-          AOZORA_COMMIT: ${{ needs.prepare.outputs.aozora_commit }}
+          AOZORA_VERSION: ${{ needs.prepare.outputs.aozora_version }}
         run: |
           set -euo pipefail
           gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/assets.json"
@@ -545,12 +557,12 @@ jobs:
           JMDICT_CREATED=$(jq -r '.sources.jmdict.created' "$RUNNER_TEMP/manifest.json")
           AJIMEE_ACCURACY=$(jq -r '.benchmarks.ajimee.metrics.overall.accuracy_at_1' "$RUNNER_TEMP/manifest.json")
           AJIMEE_MINCER=$(jq -r '.benchmarks.ajimee.metrics.overall.mean_min_cer' "$RUNNER_TEMP/manifest.json")
-          AOZORA_SHORT=${AOZORA_COMMIT:0:12}
+          AOZORA_SHORT=${AOZORA_VERSION:0:12}
           {
             echo "Automated Japanese corpus release."
             echo
             echo "- Japanese Wikipedia dump: $DUMP_DATE"
-            echo "- Aozora Bunko repository commit: $AOZORA_SHORT"
+            echo "- Aozora Bunko source version: $AOZORA_SHORT"
             echo "- Documents: $RECORDS"
             echo "- Characters: $CHARACTERS"
             echo "- Mozc unigram entries: $UNIGRAMS"

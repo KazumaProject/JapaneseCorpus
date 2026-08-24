@@ -7,7 +7,7 @@ from .aozora import build_aozora, selected_source_paths
 from .common import write_json
 from .discover import (
     AOZORA_METADATA_URL,
-    AOZORA_REPOSITORY_URL,
+    AOZORA_SOURCE_ROOT_URL,
     JMDICT_URL,
     WIKIMEDIA_ROOT,
     discover_sources,
@@ -26,7 +26,13 @@ def build_parser() -> argparse.ArgumentParser:
     discover = subparsers.add_parser("discover", help="Discover current source versions")
     discover.add_argument("--output", type=Path, required=True)
     discover.add_argument("--wikipedia-root", default=WIKIMEDIA_ROOT)
-    discover.add_argument("--aozora-repository", default=AOZORA_REPOSITORY_URL)
+    discover.add_argument(
+        "--aozora-source-root",
+        "--aozora-repository",
+        dest="aozora_source_root",
+        default=AOZORA_SOURCE_ROOT_URL,
+        help="Official Aozora source root (the repository alias is deprecated)",
+    )
     discover.add_argument("--aozora-metadata", default=AOZORA_METADATA_URL)
     discover.add_argument("--jmdict-url", default=JMDICT_URL)
 
@@ -84,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
             args.output,
             discover_sources(
                 wikipedia_root=args.wikipedia_root,
-                aozora_repository=args.aozora_repository,
+                aozora_source_root=args.aozora_source_root,
                 aozora_metadata=args.aozora_metadata,
                 jmdict_url=args.jmdict_url,
             ),

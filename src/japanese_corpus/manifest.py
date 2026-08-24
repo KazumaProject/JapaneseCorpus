@@ -129,8 +129,12 @@ def build_manifest(
                 "license": "CC-BY-SA-4.0",
             },
             "aozora_bunko": {
-                "repository_url": aozora["repository_url"],
-                "repository_commit": aozora["repository_commit"],
+                "source_url": aozora.get(
+                    "source_url", aozora.get("repository_url", "")
+                ),
+                "source_version": aozora.get(
+                    "source_version", aozora.get("repository_commit", "")
+                ),
                 "metadata_url": aozora["metadata_url"],
                 "metadata_sha256": aozora_stats.get("metadata_sha256", ""),
                 "license": "Public-Domain-only selection",

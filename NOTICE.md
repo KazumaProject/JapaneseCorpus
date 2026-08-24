@@ -16,10 +16,10 @@ source timestamps. It does not contain images.
 - Source: <https://www.aozora.gr.jp/>
 - Official metadata: <https://www.aozora.gr.jp/index_pages/person_all.html>
 - File-handling guidelines: <https://www.aozora.gr.jp/guide/kijyunn.html>
-- Official source repository: <https://github.com/aozorabunko/aozorabunko>
+- Official source files and metadata: <https://www.aozora.gr.jp/>
 
 Only works whose official work and person copyright flags are all `なし` are
-included. The exact repository commit and metadata archive checksum are recorded in
+included. The metadata archive checksum and derived source version are recorded in
 each Release manifest.
 
 ## Pipeline inspiration

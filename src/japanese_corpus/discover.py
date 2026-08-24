@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import hashlib
 import re
-import subprocess
 import urllib.request
 from typing import Callable
 from urllib.parse import urljoin
@@ -11,7 +11,9 @@ WIKIMEDIA_ROOT = "https://dumps.wikimedia.org/other/cirrus_search_index/"
 AOZORA_METADATA_URL = (
     "https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip"
 )
-AOZORA_REPOSITORY_URL = "https://github.com/aozorabunko/aozorabunko.git"
+AOZORA_SOURCE_ROOT_URL = "https://www.aozora.gr.jp/"
+# Kept as an import-compatible alias for callers of the original CLI/API.
+AOZORA_REPOSITORY_URL = AOZORA_SOURCE_ROOT_URL
 JMDICT_URL = "https://www.edrdg.org/pub/Nihongo/JMdict_e.gz"
 
 DATE_LINK_RE = re.compile(r'href=["\'](\d{8}/)["\']')
@@ -26,6 +28,14 @@ def fetch_text(url: str) -> str:
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode("utf-8")
+
+
+def fetch_bytes(url: str) -> bytes:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "KazumaProject-JapaneseCorpus/0.1"}
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read()
 
 
 def fetch_headers(url: str) -> dict[str, str]:
@@ -80,17 +90,24 @@ def discover_wikipedia(
     raise RuntimeError("No completed Japanese Wikipedia content dump found")
 
 
-def discover_git_head(repository_url: str = AOZORA_REPOSITORY_URL) -> str:
-    result = subprocess.run(
-        ["git", "ls-remote", repository_url, "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    fields = result.stdout.strip().split()
-    if len(fields) != 2 or fields[1] != "HEAD":
-        raise RuntimeError(f"Could not discover HEAD for {repository_url}")
-    return fields[0]
+def discover_aozora(
+    source_root: str = AOZORA_SOURCE_ROOT_URL,
+    metadata_url: str = AOZORA_METADATA_URL,
+    fetcher: Callable[[str], bytes] = fetch_bytes,
+) -> dict[str, str]:
+    """Discover the official source version without relying on a Git mirror.
+
+    The former GitHub repository is no longer publicly reachable.  The official
+    metadata archive is served alongside the source files, so its digest is a
+    stable and reproducible version identifier for the selected source set.
+    """
+    metadata_sha256 = hashlib.sha256(fetcher(metadata_url)).hexdigest()
+    return {
+        "source_url": source_root,
+        "source_version": metadata_sha256,
+        "metadata_url": metadata_url,
+        "metadata_sha256": metadata_sha256,
+    }
 
 
 def discover_jmdict(
@@ -119,17 +136,13 @@ def discover_jmdict(
 
 def discover_sources(
     wikipedia_root: str = WIKIMEDIA_ROOT,
-    aozora_repository: str = AOZORA_REPOSITORY_URL,
+    aozora_source_root: str = AOZORA_SOURCE_ROOT_URL,
     aozora_metadata: str = AOZORA_METADATA_URL,
     jmdict_url: str = JMDICT_URL,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
         "wikipedia": discover_wikipedia(wikipedia_root),
-        "aozora": {
-            "repository_url": aozora_repository,
-            "repository_commit": discover_git_head(aozora_repository),
-            "metadata_url": aozora_metadata,
-        },
+        "aozora": discover_aozora(aozora_source_root, aozora_metadata),
         "jmdict": discover_jmdict(jmdict_url),
     }
