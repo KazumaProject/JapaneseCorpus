@@ -225,6 +225,106 @@ jobs:
           path: ${{ runner.temp }}/aozora.stats.json
           retention-days: 1
 
+  homophones:
+    needs: [prepare, wikipedia, aozora]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install homophone build dependencies
+        run: |
+          set -euo pipefail
+          command -v zstd && command -v xz || { sudo apt-get update && sudo apt-get install -y zstd xz-utils; }
+          rustc --version
+          cargo --version
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/vibrato-ipadic.tar.xz" \
+            https://github.com/daac-tools/vibrato/releases/download/v0.5.0/ipadic-mecab-2_7_0.tar.xz
+          echo "$VIBRATO_IPADIC_ARCHIVE_SHA256  $RUNNER_TEMP/vibrato-ipadic.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/vibrato"
+          tar -xJf "$RUNNER_TEMP/vibrato-ipadic.tar.xz" -C "$RUNNER_TEMP/vibrato"
+          zstd --decompress --force \
+            "$RUNNER_TEMP/vibrato/ipadic-mecab-2_7_0/system.dic.zst" \
+            -o "$RUNNER_TEMP/vibrato/system.dic"
+      - name: Download draft corpus assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/corpus"
+          gh release download "$RELEASE_TAG" \
+            --pattern 'wikipedia-*.jsonl.zst' \
+            --pattern 'aozora-*.jsonl.zst' \
+            --dir "$RUNNER_TEMP/corpus"
+          EXPECTED=$(($(jq 'length' <<< '${{ needs.prepare.outputs.matrix }}') + 1))
+          ACTUAL=$(find "$RUNNER_TEMP/corpus" -maxdepth 1 -type f -name '*.jsonl.zst' | wc -l)
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "Expected $EXPECTED corpus assets, downloaded $ACTUAL." >&2
+            exit 1
+          fi
+          find "$RUNNER_TEMP/corpus" -maxdepth 1 -type f -name '*.jsonl.zst' \
+            -print0 | sort -z | xargs -0 -n1 zstd --test
+      - name: Build and upload curated homophone corpus
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUTPUT="$RUNNER_TEMP/homophone-output"
+          mkdir -p "$OUTPUT"
+          mapfile -d '' INPUTS < <(
+            find "$RUNNER_TEMP/corpus" -maxdepth 1 -type f -name '*.jsonl.zst' \
+              -print0 | sort -z
+          )
+          INPUT_ARGS=()
+          for INPUT in "${INPUTS[@]}"; do
+            INPUT_ARGS+=(--input "$INPUT")
+          done
+          cargo run --release --locked \
+            --manifest-path ngram-builder/Cargo.toml -- build-homophones \
+            "${INPUT_ARGS[@]}" \
+            --vibrato-dictionary "$RUNNER_TEMP/vibrato/system.dic" \
+            --output-dir "$OUTPUT" \
+            --min-natural-occurrences 2 \
+            --min-natural-sentences 2 \
+            --occurrence-shard-records 5000000 \
+            --vibrato-dictionary-version "$VIBRATO_IPADIC_VERSION" \
+            --pipeline-commit "$GITHUB_SHA"
+          jq -e '.corpus.document_limit == null and .quality.selected_groups == .corpus.homophone_groups and .quality.selected_occurrences == .corpus.occurrences' \
+            "$OUTPUT/homophone-manifest.json" >/dev/null
+          zstd --test "$OUTPUT/homophone-groups.jsonl.zst"
+          find "$OUTPUT" -maxdepth 1 -type f -name 'homophone-occurrences-*.jsonl.zst' \
+            -print0 | sort -z | xargs -0 -n1 zstd --test
+          (cd "$OUTPUT" && sha256sum --check HOMOPHONE-SHA256SUMS)
+          mapfile -d '' ASSETS < <(find "$OUTPUT" -maxdepth 1 -type f -print0 | sort -z)
+          gh release upload "$RELEASE_TAG" "${ASSETS[@]}"
+          gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/homophone-remote-assets.json"
+          for ASSET in "${ASSETS[@]}"; do
+            NAME=$(basename "$ASSET")
+            LOCAL_SIZE=$(stat --format='%s' "$ASSET")
+            REMOTE_SIZE=$(jq -r --arg name "$NAME" '.assets[] | select(.name == $name) | .size' \
+              "$RUNNER_TEMP/homophone-remote-assets.json")
+            if [[ "$REMOTE_SIZE" != "$LOCAL_SIZE" ]]; then
+              echo "Uploaded homophone asset size mismatch: $NAME local=$LOCAL_SIZE remote=$REMOTE_SIZE" >&2
+              exit 1
+            fi
+          done
+      - name: Save homophone metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: homophone-metadata
+          path: |
+            ${{ runner.temp }}/homophone-output/homophone-manifest.json
+            ${{ runner.temp }}/homophone-output/HOMOPHONE-SHA256SUMS
+          retention-days: 1
+
   dictionary:
     needs: [prepare, wikipedia, aozora, english-dictionary]
     if: needs.prepare.outputs.should_build == 'true'
@@ -509,7 +609,7 @@ jobs:
           retention-days: 1
 
   finalize:
-    needs: [prepare, wikipedia, aozora, dictionary, english-dictionary]
+    needs: [prepare, wikipedia, aozora, homophones, dictionary, english-dictionary]
     if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -540,6 +640,11 @@ jobs:
         with:
           name: english-dictionary-metadata
           path: ${{ runner.temp }}/english
+      - name: Download homophone metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: homophone-metadata
+          path: ${{ runner.temp }}/homophone
       - name: Verify, publish, and prune releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -572,6 +677,9 @@ jobs:
           BIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 2) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           TRIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 3) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           ENGLISH_ENTRIES=$(jq -r '.english_dictionary.counts.retained_entries' "$RUNNER_TEMP/manifest.json")
+          HOMOPHONE_GROUPS=$(jq -r '.corpus.homophone_groups' "$RUNNER_TEMP/homophone/homophone-manifest.json")
+          HOMOPHONE_CANDIDATES=$(jq -r '.corpus.candidate_forms' "$RUNNER_TEMP/homophone/homophone-manifest.json")
+          HOMOPHONE_OCCURRENCES=$(jq -r '.corpus.occurrences' "$RUNNER_TEMP/homophone/homophone-manifest.json")
           JMDICT_CREATED=$(jq -r '.sources.jmdict.created' "$RUNNER_TEMP/manifest.json")
           AJIMEE_ACCURACY=$(jq -r '.benchmarks.ajimee.metrics.overall.accuracy_at_1' "$RUNNER_TEMP/manifest.json")
           AJIMEE_MINCER=$(jq -r '.benchmarks.ajimee.metrics.overall.mean_min_cer' "$RUNNER_TEMP/manifest.json")
@@ -588,6 +696,7 @@ jobs:
             echo "- Mozc trigram entries: $TRIGRAMS"
             echo "- JMdict source date: $JMDICT_CREATED"
             echo "- Hiragana-to-English entries: $ENGLISH_ENTRIES"
+            echo "- Natural homophone groups: $HOMOPHONE_GROUPS ($HOMOPHONE_CANDIDATES candidate forms, $HOMOPHONE_OCCURRENCES occurrences)"
             echo "- AJIMEE-Bench Accuracy@1: $AJIMEE_ACCURACY"
             echo "- AJIMEE-Bench mean MinCER: $AJIMEE_MINCER"
             echo

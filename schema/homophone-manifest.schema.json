@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/homophone-manifest.schema.json",
+  "title": "JapaneseCorpus homophone corpus manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "format",
+    "selection",
+    "tokenizer",
+    "corpus",
+    "quality",
+    "assets"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "format": { "type": "object" },
+    "selection": { "type": "object" },
+    "tokenizer": { "type": "object" },
+    "corpus": {
+      "type": "object",
+      "required": [
+        "input_assets",
+        "documents",
+        "sentences",
+        "valid_tokens",
+        "homophone_groups",
+        "candidate_forms",
+        "occurrences",
+        "pipeline_commit"
+      ],
+      "properties": {
+        "input_assets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "bytes", "sha256"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "bytes": { "type": "integer", "minimum": 0 },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "documents": { "type": "integer", "minimum": 0 },
+        "sentences": { "type": "integer", "minimum": 0 },
+        "valid_tokens": { "type": "integer", "minimum": 0 },
+        "reading_source_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "homophone_groups": { "type": "integer", "minimum": 0 },
+        "candidate_forms": { "type": "integer", "minimum": 0 },
+        "occurrences": { "type": "integer", "minimum": 0 },
+        "occurrence_shard_records": { "type": "integer", "minimum": 1 },
+        "pipeline_commit": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "quality": {
+      "type": "object",
+      "required": [
+        "raw_reading_groups",
+        "raw_candidate_forms",
+        "candidate_forms_after_evidence_filter",
+        "rejected_candidate_forms",
+        "rejected_groups",
+        "variant_collapsed_forms",
+        "selected_groups",
+        "selected_candidate_forms",
+        "selected_occurrences",
+        "candidate_rejection_reasons",
+        "group_rejection_reasons",
+        "token_rejection_reasons"
+      ],
+      "properties": {
+        "raw_reading_groups": { "type": "integer", "minimum": 0 },
+        "raw_candidate_forms": { "type": "integer", "minimum": 0 },
+        "candidate_forms_after_evidence_filter": { "type": "integer", "minimum": 0 },
+        "rejected_candidate_forms": { "type": "integer", "minimum": 0 },
+        "rejected_groups": { "type": "integer", "minimum": 0 },
+        "variant_collapsed_forms": { "type": "integer", "minimum": 0 },
+        "selected_groups": { "type": "integer", "minimum": 0 },
+        "selected_candidate_forms": { "type": "integer", "minimum": 0 },
+        "selected_occurrences": { "type": "integer", "minimum": 0 },
+        "candidate_rejection_reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "group_rejection_reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "token_rejection_reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["name", "records", "bytes", "sha256"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "records": { "type": "integer", "minimum": 0 },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

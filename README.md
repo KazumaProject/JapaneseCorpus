@@ -27,6 +27,9 @@
 - `english-dictionary-manifest.json` / `ENGLISH-DICTIONARY-SHA256SUMS`: 日英辞書の出典、件数、検証値
 - `JMdict_e-<date>.xml.gz` / `JMDICT-LICENSE.html`: 使用したJMdict原本とライセンス
 - `ajimee-bench-report.json`: AJIMEE-BenchによるAccuracy@1／MinCER評価
+- `homophone-groups.jsonl.zst`: 読みごとの同音語グループと候補別頻度
+- `homophone-occurrences-<shard>.jsonl.zst`: 同音語の出現文、前後文脈、形態素情報（500万レコード単位の分割）
+- `homophone-manifest.json` / `HOMOPHONE-SHA256SUMS`: 同音語コーパスの条件と検証値
 
 展開例:
 
@@ -106,10 +109,49 @@ EDRDGが日次配布する英語版JMdictから、カタカナだけで構成さ
 `corridor`のように読み全体に対応しない候補は収録しません。
 入力に使ったJMdict原本、SHA-256、ETag、生成日、ライセンスをReleaseへ同梱します。
 
+## Homophone context corpus
+
+同音異義語用の派生コーパスは、既存のWikipedia／青空文庫JSONLをSudachiPyで
+解析し、自然性査定を通過した同音語だけを残します。査定条件は、辞書既知の内容語、
+日本語として妥当な表記、URL・マークアップ・数値表中心でない文脈、候補ごとの最低2出現・
+2文、異なる支配lemmaを持つグループです。かな・送り仮名だけが異なる表記揺れは、
+コーパス内で最も頻出する代表形に統合します。除外理由と件数はmanifestの`quality`に
+記録するため、全量を査定した結果を再検証できます。
+
+表記ごとの頻度、文書数、文数、原形、品詞、出典別件数を保持し、出現例には文、Unicode
+コードポイント単位の文書内オフセット、前後文脈を保存します。青空文庫ではトークン範囲と
+一致するルビをSudachiの読みより優先します。
+
+生成には追加依存のSudachiPyとSudachiDict-coreが必要です。
+自動Releaseでは同じ査定ポリシーをRust/Vibrato/IPADICの高速実装で適用します。
+
+```console
+python3 -m pip install -e '.[homophones]'
+inputs=()
+for path in work/benchmark/base-corpus/*.jsonl.zst; do
+  inputs+=(--input "$path")
+done
+PYTHONPATH=src python3 -m japanese_corpus build-homophones \
+  "${inputs[@]}" \
+  --output-dir work/homophone-corpus \
+  --pipeline-commit "$(git rev-parse HEAD)"
+```
+
+全量生成では`work/benchmark/base-corpus`にあるWikipedia全shardと青空文庫を対象にします。
+開発時は`--limit-documents 1000`で先頭の文書だけを処理できます。`--min-natural-occurrences`
+と`--min-natural-sentences`を下げると査定を緩められますが、公開Releaseは既定の保守的な
+自然性ポリシーで生成します。出現資産はGitHub Releaseの個別ファイル上限を超えないよう、
+既定で500万レコードごとに分割されます。
+
+グループと出現例のスキーマは、それぞれ
+`schema/homophone-group.schema.json`と`schema/homophone-occurrence.schema.json`、
+生成条件は`schema/homophone-manifest.schema.json`で定義します。
+
 ## Development
 
-Python 3.11以上、Git、`zstd` が必要です。ランタイムのPython外部依存は
-ありません。
+Python 3.11以上、Git、`zstd` が必要です。通常のコーパス生成にはランタイムの
+Python外部依存はありません。同音語コーパス生成だけは、上記の
+`homophones`追加依存を使用します。
 
 ```console
 PYTHONPATH=src python3 -m unittest discover -s tests -v

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use japanese_corpus_ngram::{build, BuildOptions};
+use japanese_corpus_ngram::{build, build_homophones, BuildOptions, HomophoneBuildOptions};
 
 #[derive(Debug, Parser)]
 #[command(about = "Build Mozc-format 1/2/3-gram dictionaries from JapaneseCorpus")]
@@ -47,6 +47,28 @@ enum Command {
         #[arg(long)]
         pipeline_commit: String,
     },
+    BuildHomophones {
+        #[arg(long, required = true)]
+        input: Vec<PathBuf>,
+        #[arg(long, required = true)]
+        vibrato_dictionary: PathBuf,
+        #[arg(long)]
+        output_dir: PathBuf,
+        #[arg(long, default_value_t = 2)]
+        min_group_size: usize,
+        #[arg(long, default_value_t = 1)]
+        min_candidate_count: u64,
+        #[arg(long, default_value_t = 2)]
+        min_natural_occurrences: u64,
+        #[arg(long, default_value_t = 2)]
+        min_natural_sentences: u64,
+        #[arg(long, default_value_t = 5_000_000)]
+        occurrence_shard_records: u64,
+        #[arg(long, default_value = "unknown")]
+        vibrato_dictionary_version: String,
+        #[arg(long, default_value = "working-tree")]
+        pipeline_commit: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -83,6 +105,29 @@ fn main() -> Result<()> {
             cost_scale,
             entries_per_shard,
             mozc_commit,
+            vibrato_dictionary_version,
+            pipeline_commit,
+        }),
+        Command::BuildHomophones {
+            input,
+            vibrato_dictionary,
+            output_dir,
+            min_group_size,
+            min_candidate_count,
+            min_natural_occurrences,
+            min_natural_sentences,
+            occurrence_shard_records,
+            vibrato_dictionary_version,
+            pipeline_commit,
+        } => build_homophones(HomophoneBuildOptions {
+            inputs: input,
+            vibrato_dictionary,
+            output_dir,
+            min_group_size,
+            min_candidate_count,
+            min_natural_occurrences,
+            min_natural_sentences,
+            occurrence_shard_records,
             vibrato_dictionary_version,
             pipeline_commit,
         }),

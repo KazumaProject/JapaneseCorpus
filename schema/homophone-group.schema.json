@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/homophone-group.schema.json",
+  "title": "JapaneseCorpus homophone group",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "group_id",
+    "reading",
+    "candidate_count",
+    "total_occurrences",
+    "candidates"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "group_id": { "type": "string", "minLength": 1 },
+    "reading": { "type": "string", "minLength": 1 },
+    "candidate_count": { "type": "integer", "minimum": 2 },
+    "total_occurrences": { "type": "integer", "minimum": 1 },
+    "candidates": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": [
+          "surface",
+          "occurrence_count",
+          "document_count",
+          "sentence_count",
+          "lemma_count",
+          "dominant_lemma",
+          "lemmas",
+          "parts_of_speech",
+          "source_counts",
+          "reading_source_counts"
+        ],
+        "properties": {
+          "surface": { "type": "string", "minLength": 1 },
+          "occurrence_count": { "type": "integer", "minimum": 1 },
+          "document_count": { "type": "integer", "minimum": 1 },
+          "sentence_count": { "type": "integer", "minimum": 1 },
+          "lemma_count": { "type": "integer", "minimum": 1 },
+          "dominant_lemma": { "type": "string", "minLength": 1 },
+          "lemmas": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "parts_of_speech": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "source_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "reading_source_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

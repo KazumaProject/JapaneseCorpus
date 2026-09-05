@@ -48,6 +48,16 @@ redistributed, apart from the matching context-ID definition and required notice
 Vibrato and IPADIC are used for morphological analysis and readings. The Release
 includes `IPADIC-COPYING` and `IPADIC-NOTICE` alongside the generated dictionaries.
 
+## SudachiPy and SudachiDict
+
+- SudachiPy: <https://github.com/WorksApplications/SudachiPy>, Apache License 2.0
+- SudachiDict: <https://github.com/WorksApplications/SudachiDict>, Apache License 2.0
+
+The optional homophone-corpus builder uses SudachiPy with SudachiDict-core for
+tokenization and readings. These dependencies are not bundled in the base
+corpus assets; the generated homophone corpus remains subject to the source
+corpus terms described above.
+
 ## JMdict Japanese-English dictionary
 
 - Project: Electronic Dictionary Research and Development Group JMdict/EDICT

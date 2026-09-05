@@ -176,6 +176,19 @@ struct MorphToken {
     subsubpos: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct AnnotatedToken {
+    pub surface: String,
+    pub reading: String,
+    pub reading_source: String,
+    pub lemma: String,
+    pub pos: String,
+    pub subpos: String,
+    pub subsubpos: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
 pub struct TokenSequenceBuilder<'a> {
     tokenizer: &'a Tokenizer,
     id_map: &'a MozcIdMap,
@@ -234,6 +247,73 @@ impl<'a> TokenSequenceBuilder<'a> {
             });
         }
         flush_contiguous(&mut contiguous, &mut result);
+        Ok(result)
+    }
+}
+
+pub struct AnnotatedTokenSequenceBuilder<'a> {
+    tokenizer: &'a Tokenizer,
+}
+
+impl<'a> AnnotatedTokenSequenceBuilder<'a> {
+    pub fn new(tokenizer: &'a Tokenizer) -> Self {
+        Self { tokenizer }
+    }
+
+    /// Tokenize a sentence without the conversion-unit merging used by n-grams.
+    ///
+    /// Homophone records need lexical boundaries, lemmas, and offsets. Keeping
+    /// this path separate from `TokenSequenceBuilder` avoids changing the
+    /// vocabulary semantics of the existing dictionary builder.
+    pub fn tokenize(&self, sentence: &str) -> Result<Vec<AnnotatedToken>> {
+        let mut worker = self.tokenizer.new_worker();
+        worker.reset_sentence(sentence);
+        worker.tokenize();
+
+        let mut result = Vec::new();
+        for index in 0..worker.num_tokens() {
+            let token = worker.token(index);
+            let feature = token.feature();
+            let parts: Vec<&str> = feature.split(',').collect();
+            let pos = parts.first().copied().unwrap_or("UNK");
+            let surface = token.surface();
+            let reading_raw = parts.get(7).copied().unwrap_or("*");
+            let reading = if reading_raw == "*" {
+                if surface.chars().all(is_kana) {
+                    katakana_to_hiragana(surface)
+                } else {
+                    continue;
+                }
+            } else {
+                katakana_to_hiragana(reading_raw)
+            };
+
+            if pos == "記号"
+                || !contains_japanese_letter(surface)
+                || !valid_dictionary_text(surface)
+                || !valid_reading(&reading)
+            {
+                continue;
+            }
+
+            let range = token.range_byte();
+            let lemma = parts
+                .get(6)
+                .copied()
+                .filter(|value| *value != "*")
+                .unwrap_or(surface);
+            result.push(AnnotatedToken {
+                surface: surface.to_owned(),
+                reading,
+                reading_source: "vibrato".to_owned(),
+                lemma: lemma.to_owned(),
+                pos: pos.to_owned(),
+                subpos: parts.get(1).copied().unwrap_or("UNK").to_owned(),
+                subsubpos: parts.get(2).copied().unwrap_or("UNK").to_owned(),
+                start_byte: range.start,
+                end_byte: range.end,
+            });
+        }
         Ok(result)
     }
 }
@@ -304,6 +384,54 @@ pub fn split_sentences(text: &str) -> Vec<&str> {
     result
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SentenceSpan {
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+/// Split text while retaining byte offsets and terminal punctuation.
+pub fn split_sentence_spans(text: &str) -> Vec<SentenceSpan> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    for (offset, character) in text.char_indices() {
+        let character_end = offset + character.len_utf8();
+        if character == '\n' || matches!(character, '。' | '！' | '？' | '!' | '?') {
+            let end = if character == '\n' {
+                offset
+            } else {
+                character_end
+            };
+            push_trimmed_span(text, start, end, &mut result);
+            start = character_end;
+        }
+    }
+    push_trimmed_span(text, start, text.len(), &mut result);
+    result
+}
+
+fn push_trimmed_span(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    output: &mut Vec<SentenceSpan>,
+) {
+    if start_byte >= end_byte {
+        return;
+    }
+    let value = &text[start_byte..end_byte];
+    let leading = value.len() - value.trim_start().len();
+    let trailing = value.len() - value.trim_end().len();
+    let trimmed_start = start_byte + leading;
+    let trimmed_end = end_byte - trailing;
+    if trimmed_start < trimmed_end {
+        output.push(SentenceSpan {
+            start_byte: trimmed_start,
+            end_byte: trimmed_end,
+        });
+    }
+}
+
 fn katakana_to_hiragana(input: &str) -> String {
     input
         .chars()
@@ -365,6 +493,33 @@ mod tests {
         assert_eq!(
             split_sentences("今日は晴れ。明日も晴れ！\n最終行"),
             vec!["今日は晴れ", "明日も晴れ", "最終行"]
+        );
+    }
+
+    #[test]
+    fn sentence_spans_keep_punctuation_and_offsets() {
+        let text = " 今日は晴れ。\n明日も晴れ！ ";
+        let spans = split_sentence_spans(text);
+        assert_eq!(
+            spans,
+            vec![
+                SentenceSpan {
+                    start_byte: 1,
+                    end_byte: " 今日は晴れ。".len(),
+                },
+                SentenceSpan {
+                    start_byte: " 今日は晴れ。\n".len(),
+                    end_byte: text.len() - 1,
+                },
+            ]
+        );
+        assert_eq!(
+            &text[spans[0].start_byte..spans[0].end_byte],
+            "今日は晴れ。"
+        );
+        assert_eq!(
+            &text[spans[1].start_byte..spans[1].end_byte],
+            "明日も晴れ！"
         );
     }
 

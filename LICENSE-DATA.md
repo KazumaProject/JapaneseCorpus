@@ -22,6 +22,10 @@ and are distributed under CC BY-SA 4.0. The bundled Mozc context-ID definition
 and third-party notice files retain their respective upstream terms; see the
 Release assets `MOZC-LICENSE`, `IPADIC-COPYING`, and `IPADIC-NOTICE`.
 
+The homophone context corpus is a derived selection of source sentences and
+token annotations, and is distributed under CC BY-SA 4.0 with the same source
+attribution and share-alike obligations.
+
 The hiragana-to-English dictionary is derived from the Electronic Dictionary
 Research and Development Group's JMdict file and is distributed under the
 same CC BY-SA 4.0 terms. The exact source snapshot and the EDRDG licence page
