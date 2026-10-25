@@ -116,11 +116,21 @@ def annotate_record(
     ]
     cursor = 0
     for token in morphology:
-        if token["start"] != cursor or token["end"] <= cursor:
-            raise RuntimeError("GiNZA morphology offsets do not cover the phrase in order")
-        cursor = token["end"]
-    if cursor != len(surface) or "".join(token["surface"] for token in morphology) != surface:
-        raise RuntimeError("GiNZA morphology does not cover the complete phrase")
+        start, end = token["start"], token["end"]
+        gap = surface[cursor:start]
+        if (
+            start < cursor
+            or end <= start
+            or (gap and not gap.isspace())
+            or surface[start:end] != token["surface"]
+        ):
+            raise RuntimeError(
+                "GiNZA morphology offsets are invalid or leave non-whitespace text uncovered"
+            )
+        cursor = end
+    trailing_text = surface[cursor:]
+    if not morphology or (trailing_text and not trailing_text.isspace()):
+        raise RuntimeError("GiNZA morphology does not cover all non-whitespace text")
 
     bunsetsu = []
     cursor = 0

@@ -1,7 +1,57 @@
+import json
+from pathlib import Path
 import unittest
 
-from annotate import minimum_count_for_order
+import jsonschema
+import spacy
+
+from annotate import annotate_record, minimum_count_for_order
 from japanese_corpus.release_verify import validate_annotated_record
+
+
+class AnnotateRecordTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        repository_root = Path(__file__).resolve().parents[2]
+        schema = json.loads(
+            (repository_root / "schema/ngram-annotated-record.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        cls.validator = jsonschema.Draft202012Validator(schema)
+        cls.nlp = spacy.load("ja_ginza")
+
+    def test_trailing_ideographic_space_is_not_required_to_be_a_morpheme(self) -> None:
+        surface = "ルーマニア　"
+        source = {
+            "order": 1,
+            "count": 46,
+            "total_observations": 1_298_029_758,
+            "reading": "るーまにあ",
+            "surface": surface,
+            "left_id": 1928,
+            "right_id": 1928,
+            "cost": 13724,
+            "source_tokens": [
+                {
+                    "surface": surface,
+                    "reading": "るーまにあ",
+                    "left_id": 1928,
+                    "right_id": 1928,
+                }
+            ],
+        }
+
+        annotated = annotate_record(self.nlp(surface), source, self.validator)
+
+        self.assertEqual(annotated["morphology"][0]["surface"], "ルーマニア")
+        self.assertEqual(
+            (annotated["morphology"][0]["start"], annotated["morphology"][0]["end"]),
+            (0, 5),
+        )
+        self.assertEqual(
+            annotated["bunsetsu"], [{"surface": surface, "start": 0, "end": 6}]
+        )
 
 
 class MinimumCountForOrderTest(unittest.TestCase):
