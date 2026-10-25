@@ -92,6 +92,22 @@ def analysis_samples(path: Path, threshold: int) -> Iterator[tuple[str, dict[str
         yield surface, record
 
 
+def bunsetsu_spans(doc: Any) -> Iterator[Any]:
+    labels = ginza.bunsetu_bi_labels(doc)
+    if len(labels) != len(doc) or any(label not in {"B", "I"} for label in labels):
+        raise RuntimeError("GiNZA returned invalid bunsetsu boundary labels")
+
+    boundaries = [0]
+    for token in doc:
+        if token.i > 0 and (labels[token.i] == "B" or token.is_sent_start):
+            boundaries.append(token.i)
+    boundaries.append(len(doc))
+
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end > start:
+            yield doc[start:end]
+
+
 def annotate_record(
     doc: Any,
     source: dict[str, Any],
@@ -134,7 +150,7 @@ def annotate_record(
 
     bunsetsu = []
     cursor = 0
-    for span in ginza.bunsetu_spans(doc):
+    for span in bunsetsu_spans(doc):
         start, end = span.start_char, span.end_char
         if start != cursor or end <= start or surface[start:end] != span.text:
             raise RuntimeError("GiNZA bunsetsu offsets are invalid or discontinuous")

@@ -53,6 +53,42 @@ class AnnotateRecordTest(unittest.TestCase):
             annotated["bunsetsu"], [{"surface": surface, "start": 0, "end": 6}]
         )
 
+    def test_bunsetu_boundary_without_a_head_is_preserved(self) -> None:
+        surface = "に外ならないのである"
+        source = {
+            "order": 5,
+            "count": 55,
+            "total_observations": 401_817_041,
+            "reading": "にそとならないのである",
+            "surface": surface,
+            "left_id": 372,
+            "right_id": 53,
+            "cost": 12643,
+            "source_tokens": [
+                {"surface": "に", "reading": "に", "left_id": 372, "right_id": 372},
+                {"surface": "外", "reading": "そと", "left_id": 1851, "right_id": 1851},
+                {
+                    "surface": "ならない",
+                    "reading": "ならない",
+                    "left_id": 773,
+                    "right_id": 204,
+                },
+                {"surface": "の", "reading": "の", "left_id": 2080, "right_id": 2080},
+                {"surface": "である", "reading": "である", "left_id": 168, "right_id": 53},
+            ],
+        }
+
+        annotated = annotate_record(self.nlp(surface), source, self.validator)
+
+        self.assertEqual(
+            [item["surface"] for item in annotated["bunsetsu"]],
+            ["に", "外", "なら", "ない", "のである"],
+        )
+        self.assertEqual(
+            [(item["start"], item["end"]) for item in annotated["bunsetsu"]],
+            [(0, 1), (1, 2), (2, 4), (4, 6), (6, 10)],
+        )
+
 
 class MinimumCountForOrderTest(unittest.TestCase):
     def test_unigrams_use_the_unigram_threshold(self) -> None:
