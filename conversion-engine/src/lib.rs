@@ -18,7 +18,7 @@ pub struct DictionaryEntry {
     pub left_id: u16,
     pub right_id: u16,
     pub cost: i32,
-    /// 1, 2, or 3 for the dictionary asset from which this entry was loaded.
+    /// 1 through 5 for the dictionary asset from which this entry was loaded.
     pub order: u8,
 }
 
@@ -129,7 +129,7 @@ pub struct Segment {
     pub left_id: u16,
     pub right_id: u16,
     pub cost: i64,
-    /// 0 denotes an unknown-character fallback; 1 through 3 denote dictionary order.
+    /// 0 denotes an unknown-character fallback; 1 through 5 denote dictionary order.
     pub order: u8,
 }
 
@@ -433,14 +433,18 @@ where
     files.sort_unstable();
     files.dedup();
     if files.is_empty() {
-        bail!("no mozc-unigram/bigram/trigram .txt or .txt.zst files were found");
+        bail!("no mozc unigram or 2- through 5-gram .txt or .txt.zst files were found");
     }
     Ok(files)
 }
 
 fn is_dictionary_filename(name: &str) -> bool {
     name.starts_with("mozc-")
-        && (name.contains("-unigram-") || name.contains("-bigram-") || name.contains("-trigram-"))
+        && (name.contains("-unigram-")
+            || name.contains("-bigram-")
+            || name.contains("-trigram-")
+            || name.contains("-4gram-")
+            || name.contains("-5gram-"))
         && (name.ends_with(".txt") || name.ends_with(".txt.zst"))
 }
 
@@ -455,6 +459,10 @@ fn order_from_path(path: &Path) -> Result<u8> {
         Ok(2)
     } else if name.contains("trigram") {
         Ok(3)
+    } else if name.contains("4gram") {
+        Ok(4)
+    } else if name.contains("5gram") {
+        Ok(5)
     } else {
         bail!(
             "cannot infer n-gram order from dictionary filename: {}",
@@ -544,8 +552,8 @@ fn validate_entry(entry: &DictionaryEntry) -> Result<()> {
     if entry.cost < 0 {
         bail!("cost must not be negative");
     }
-    if !(1..=3).contains(&entry.order) {
-        bail!("dictionary order must be 1, 2, or 3");
+    if !(1..=5).contains(&entry.order) {
+        bail!("dictionary order must be between 1 and 5");
     }
     if entry
         .reading
@@ -609,6 +617,26 @@ mod tests {
         assert_eq!(candidates[0].cost, 150);
         assert_eq!(candidates[0].segments.len(), 2);
         assert_eq!(candidates[0].segments[0].order, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn four_and_five_gram_entries_are_loaded_and_used() -> Result<()> {
+        let converter = converter(vec![
+            entry("あ", "亜", 100, 1),
+            entry("い", "伊", 100, 1),
+            entry("う", "宇", 100, 1),
+            entry("え", "江", 100, 1),
+            entry("お", "於", 100, 1),
+            entry("あいうえ", "四語", 25, 4),
+            entry("あいうえお", "五語", 20, 5),
+        ])?;
+        let four = converter.convert("あいうえ", 1)?;
+        assert_eq!(four[0].text, "四語");
+        assert_eq!(four[0].segments[0].order, 4);
+        let five = converter.convert("あいうえお", 1)?;
+        assert_eq!(five[0].text, "五語");
+        assert_eq!(five[0].segments[0].order, 5);
         Ok(())
     }
 
@@ -689,9 +717,17 @@ mod tests {
         let mut encoder = zstd::stream::write::Encoder::new(compressed, 1)?;
         encoder.write_all("きょうは\t10\t20\t50\t今日は\n".as_bytes())?;
         encoder.finish()?;
+        fs::write(
+            directory.join("mozc-4gram-00000.txt"),
+            "あい\t10\t20\t40\t愛\n",
+        )?;
+        fs::write(
+            directory.join("mozc-5gram-00000.txt"),
+            "あいう\t10\t20\t30\t合\n",
+        )?;
 
         let dictionary = Dictionary::load_dir(&directory)?;
-        assert_eq!(dictionary.len(), 3);
+        assert_eq!(dictionary.len(), 5);
         let converter = Converter::new(dictionary);
         assert_eq!(converter.convert("きょうは", 1)?[0].text, "今日は");
         assert_eq!(converter.convert("コンピュータ", 1)?[0].text, "computer");

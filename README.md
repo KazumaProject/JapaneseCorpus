@@ -21,6 +21,9 @@
 - `mozc-unigram-<part>.txt.zst`: Mozc 5列形式の単語辞書
 - `mozc-bigram-<part>.txt.zst`: 隣接2語を句として格納したMozc 5列辞書
 - `mozc-trigram-<part>.txt.zst`: 隣接3語を句として格納したMozc 5列辞書
+- `mozc-4gram-<part>.txt.zst` / `mozc-5gram-<part>.txt.zst`: 隣接4語・5語を句として格納したMozc 5列辞書
+- `ngram-annotated-<order>-<part>.jsonl.zst`: 語・形態素・文節情報と正確な頻度を含むJSONL
+- `ngram-annotated-manifest.json` / `NGRAM-ANNOTATED-SHA256SUMS`: 解析モデル、件数、検証値
 - `mozc-id.def`: 辞書の左右文脈IDに対応するMozc定義
 - `ngram-manifest.json` / `NGRAM-SHA256SUMS`: 辞書の件数、生成条件、検証値
 - `mozc-english-reading-unigram-<part>.txt.zst`: 発音が読み全体と一致する、ひらがな読みから英語への直接辞書
@@ -76,9 +79,9 @@ zstd -dc wikipedia-20260719-00000.jsonl.zst | head -n 1 | jq
 
 辞書は公開する全コーパスをVibrato/IPADICで形態素解析して生成します。文書・文の
 境界を越えてn-gramを作らず、Akazaと同様に頻度16以上の語彙を先に確定します。
-unigramは頻度16以上、bigram/trigramは頻度32以上を収録します。
+unigramは頻度16以上、2〜5グラムは頻度32以上を収録します。
 
-bigram/trigramの候補抽出後に全コーパスを再走査するため、収録閾値以上の頻度は
+2〜5グラムの候補抽出後に全コーパスを再走査するため、収録閾値以上の頻度は
 近似値ではなく全量の正確な値です。サンプリングや先頭文書だけの処理は行いません。
 
 展開後の各行はMozcのシステム辞書ソースと同じ5列です。
@@ -87,7 +90,7 @@ bigram/trigramの候補抽出後に全コーパスを再走査するため、収
 よみ<TAB>左文脈ID<TAB>右文脈ID<TAB>コスト<TAB>表記
 ```
 
-2語・3語は読みと表記を連結した句エントリです。左文脈IDは先頭語、右文脈IDは
+2〜5語は読みと表記を連結した句エントリです。左文脈IDは先頭語、右文脈IDは
 末尾語から取得します。コストは各n-gram次数内の観測確率から算出します。これは
 4列のMozcユーザー辞書エクスポートではなく、Mozc本体をビルドするときに使う
 システム辞書ソースです。必ず同梱の`mozc-id.def`と組み合わせてください。
@@ -163,7 +166,7 @@ cargo test --locked --manifest-path jmdict-builder/Cargo.toml
 
 ## Kana-kanji conversion
 
-生成したunigram／bigram／trigram辞書を直接読み込む、独立したかな漢字変換エンジンを
+生成した1〜5グラム辞書を直接読み込む、独立したかな漢字変換エンジンを
 `conversion-engine`に収録しています。入力読みのラティスを作り、辞書コストに基づく
 ビーム探索で文脈を含む句候補を選択します。Mozc本体のビルドは不要です。
 
@@ -176,7 +179,7 @@ conversion-engine/target/release/kana-kanji-converter \
 
 出力ディレクトリに`mozc-english-reading-unigram-*`があれば、`computer`などの英語候補も
 日本語候補と一緒に返ります。`-n 5`で複数候補、`--details`で採用した
-1/2/3-gramの分割とコストを確認できます。
+1〜5グラムの分割とコストを確認できます。
 引数の読みを省略すると標準入力を1行ずつ変換するため、辞書を一度だけロードして
 継続利用できます。詳しくは[`conversion-engine/README.md`](conversion-engine/README.md)
 を参照してください。
@@ -216,10 +219,18 @@ PYTHONPATH=src python3 -m japanese_corpus build-wikipedia \
 ## Automation
 
 GitHub Actionsは毎週月曜03:17 UTCに最新ソースを確認します。Wikipediaの各
-シャードを並列処理した後、全コーパスから1/2/3-gram辞書を生成し、完成した
+シャードを並列処理した後、全コーパスから1〜5グラム辞書と文節情報を生成し、完成した
 辞書をAJIMEE-Benchで評価してから、完成したdraft Releaseを検証して公開します。
 公開後に以前のReleaseとタグを削除するため、未完成ビルドが現在の配布を壊す
 ことはありません。同一ソース・同一生成コードなら定期実行はスキップします。
+
+### 文節付きn-gramデータ
+
+`ngram-annotated-<order>-<part>.jsonl.zst`は、Mozc辞書エントリの正確な頻度と
+構成語に加え、GiNZA 5.2.0／`ja_ginza` 5.2.0で付与した形態素の読み・原形・品詞と
+文節範囲を含みます。オフセットは表記に対するUnicodeコードポイント単位の
+`[start, end)`です。文節は句そのものを単独解析した結果であり、実際の出現元の文で
+の境界を表すものではありません。
 
 ## License
 

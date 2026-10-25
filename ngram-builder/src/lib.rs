@@ -12,7 +12,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use vibrato::{Dictionary, Tokenizer};
 
-use output::{write_release_files, BuildManifestInput, OrderCounts, ThirdPartyFiles};
+use output::{
+    write_release_files, BuildManifestInput, NgramOrderCounts, OrderCounts, ThirdPartyFiles,
+};
 use tokenizer::{split_sentences, MozcIdMap, TokenKey, TokenSequenceBuilder};
 
 pub use homophone::{build_homophones, HomophoneBuildOptions};
@@ -125,24 +127,35 @@ pub fn build(mut options: BuildOptions) -> Result<()> {
         options.unigram_min_count
     );
 
-    eprintln!("phase 2/4: discovering map-local repeated bigram/trigram candidates");
+    eprintln!("phase 2/4: discovering and recounting orders 2 through 5");
     let (bigram_candidates, trigram_candidates) =
-        discover_candidates(&token_files, &raw_to_vocab, options.map_min_count)?;
-    eprintln!(
-        "candidate keys: {} bigrams, {} trigrams",
-        bigram_candidates.len(),
-        trigram_candidates.len()
-    );
-
-    eprintln!("phase 3/4: exact full-corpus recount of every candidate");
-    let recounted = recount_candidates(
+        discover_lower_candidates(&token_files, &raw_to_vocab, options.map_min_count)?;
+    let lower_orders = recount_lower_candidates(
         &token_files,
         &raw_to_vocab,
         bigram_candidates,
         trigram_candidates,
     )?;
+    let higher_orders = (4u8..=5).map(|order| {
+        eprintln!("discovering order {order} candidates");
+        let candidates = discover_order_candidates(
+            &token_files,
+            &raw_to_vocab,
+            options.map_min_count,
+            usize::from(order),
+        )?;
+        eprintln!("order {order}: {} candidate keys", candidates.len());
+        let recounted =
+            recount_order_candidates(&token_files, &raw_to_vocab, candidates, usize::from(order))?;
+        Ok(NgramOrderCounts {
+            order,
+            counts: recounted.counts,
+            total: recounted.total,
+        })
+    });
+    let higher_orders = lower_orders.into_iter().map(Ok).chain(higher_orders);
 
-    eprintln!("phase 4/4: writing deterministic Mozc dictionary shards");
+    eprintln!("phase 3/4: writing deterministic Mozc dictionary shards and analysis inputs");
     let assets = write_release_files(
         &options.output_dir,
         ThirdPartyFiles {
@@ -154,12 +167,9 @@ pub fn build(mut options: BuildOptions) -> Result<()> {
         &vocabulary,
         OrderCounts {
             unigram: unigram_counts,
-            bigram: recounted.bigrams,
-            trigram: recounted.trigrams,
             unigram_total: stats.valid_tokens,
-            bigram_total: recounted.bigram_total,
-            trigram_total: recounted.trigram_total,
         },
+        higher_orders,
         BuildManifestInput {
             input_assets: options
                 .inputs
@@ -342,27 +352,23 @@ fn make_vocabulary(
     Ok((vocabulary, raw_to_vocab, counts))
 }
 
-fn discover_candidates(
+fn discover_lower_candidates(
     token_files: &[PathBuf],
     raw_to_vocab: &[u32],
     map_min_count: u32,
-) -> Result<(FxHashSet<u64>, FxHashSet<u128>)> {
+) -> Result<(FxHashSet<[u32; 5]>, FxHashSet<[u32; 5]>)> {
     let mut bigram_candidates = FxHashSet::default();
     let mut trigram_candidates = FxHashSet::default();
     for token_file in token_files {
         eprintln!("candidate scan {}", token_file.display());
-        let mut local_bigrams: FxHashMap<u64, u32> = FxHashMap::default();
-        let mut local_trigrams: FxHashMap<u128, u32> = FxHashMap::default();
+        let mut local_bigrams: FxHashMap<[u32; 5], u32> = FxHashMap::default();
+        let mut local_trigrams: FxHashMap<[u32; 5], u32> = FxHashMap::default();
         scan_token_file(token_file, raw_to_vocab, |sequence| {
-            for pair in sequence.windows(2) {
-                *local_bigrams
-                    .entry(pack_bigram(pair[0], pair[1]))
-                    .or_default() += 1;
+            for window in sequence.windows(2) {
+                *local_bigrams.entry(pack_ngram(window)).or_default() += 1;
             }
-            for triple in sequence.windows(3) {
-                *local_trigrams
-                    .entry(pack_trigram(triple[0], triple[1], triple[2]))
-                    .or_default() += 1;
+            for window in sequence.windows(3) {
+                *local_trigrams.entry(pack_ngram(window)).or_default() += 1;
             }
         })?;
         bigram_candidates.extend(
@@ -379,50 +385,98 @@ fn discover_candidates(
     Ok((bigram_candidates, trigram_candidates))
 }
 
-struct RecountedNgrams {
-    bigrams: FxHashMap<u64, u64>,
-    trigrams: FxHashMap<u128, u64>,
-    bigram_total: u64,
-    trigram_total: u64,
-}
-
-fn recount_candidates(
+fn discover_order_candidates(
     token_files: &[PathBuf],
     raw_to_vocab: &[u32],
-    bigram_candidates: FxHashSet<u64>,
-    trigram_candidates: FxHashSet<u128>,
-) -> Result<RecountedNgrams> {
-    let mut bigrams: FxHashMap<u64, u64> =
+    map_min_count: u32,
+    order: usize,
+) -> Result<FxHashSet<[u32; 5]>> {
+    let mut candidates = FxHashSet::default();
+    for token_file in token_files {
+        eprintln!("candidate scan {}", token_file.display());
+        let mut local: FxHashMap<[u32; 5], u32> = FxHashMap::default();
+        scan_token_file(token_file, raw_to_vocab, |sequence| {
+            for window in sequence.windows(order) {
+                *local.entry(pack_ngram(window)).or_default() += 1;
+            }
+        })?;
+        candidates.extend(
+            local
+                .into_iter()
+                .filter_map(|(key, count)| (count >= map_min_count).then_some(key)),
+        );
+    }
+    Ok(candidates)
+}
+
+struct RecountedNgrams {
+    counts: FxHashMap<[u32; 5], u64>,
+    total: u64,
+}
+
+fn recount_lower_candidates(
+    token_files: &[PathBuf],
+    raw_to_vocab: &[u32],
+    bigram_candidates: FxHashSet<[u32; 5]>,
+    trigram_candidates: FxHashSet<[u32; 5]>,
+) -> Result<Vec<NgramOrderCounts>> {
+    let mut bigrams: FxHashMap<[u32; 5], u64> =
         bigram_candidates.into_iter().map(|key| (key, 0)).collect();
-    let mut trigrams: FxHashMap<u128, u64> =
+    let mut trigrams: FxHashMap<[u32; 5], u64> =
         trigram_candidates.into_iter().map(|key| (key, 0)).collect();
     let mut bigram_total = 0u64;
     let mut trigram_total = 0u64;
     for token_file in token_files {
-        eprintln!("exact recount {}", token_file.display());
+        eprintln!("exact bigram/trigram recount {}", token_file.display());
         scan_token_file(token_file, raw_to_vocab, |sequence| {
-            for pair in sequence.windows(2) {
+            for window in sequence.windows(2) {
                 bigram_total += 1;
-                if let Some(count) = bigrams.get_mut(&pack_bigram(pair[0], pair[1])) {
+                if let Some(count) = bigrams.get_mut(&pack_ngram(window)) {
                     *count += 1;
                 }
             }
-            for triple in sequence.windows(3) {
+            for window in sequence.windows(3) {
                 trigram_total += 1;
-                if let Some(count) =
-                    trigrams.get_mut(&pack_trigram(triple[0], triple[1], triple[2]))
-                {
+                if let Some(count) = trigrams.get_mut(&pack_ngram(window)) {
                     *count += 1;
                 }
             }
         })?;
     }
-    Ok(RecountedNgrams {
-        bigrams,
-        trigrams,
-        bigram_total,
-        trigram_total,
-    })
+    Ok(vec![
+        NgramOrderCounts {
+            order: 2,
+            counts: bigrams,
+            total: bigram_total,
+        },
+        NgramOrderCounts {
+            order: 3,
+            counts: trigrams,
+            total: trigram_total,
+        },
+    ])
+}
+
+fn recount_order_candidates(
+    token_files: &[PathBuf],
+    raw_to_vocab: &[u32],
+    candidates: FxHashSet<[u32; 5]>,
+    order: usize,
+) -> Result<RecountedNgrams> {
+    let mut counts: FxHashMap<[u32; 5], u64> = candidates.into_iter().map(|key| (key, 0)).collect();
+    let mut total = 0u64;
+    for token_file in token_files {
+        eprintln!("exact order-{order} recount {}", token_file.display());
+        scan_token_file(token_file, raw_to_vocab, |sequence| {
+            for window in sequence.windows(order) {
+                total += 1;
+                if let Some(count) = counts.get_mut(&pack_ngram(window)) {
+                    *count += 1;
+                }
+            }
+        })?;
+    }
+    Ok(RecountedNgrams { counts, total })
 }
 
 fn scan_token_file(
@@ -457,20 +511,10 @@ fn scan_token_file(
     Ok(())
 }
 
-pub(crate) fn pack_bigram(first: u32, second: u32) -> u64 {
-    (u64::from(first) << 32) | u64::from(second)
-}
-
-pub(crate) fn unpack_bigram(key: u64) -> (u32, u32) {
-    ((key >> 32) as u32, key as u32)
-}
-
-pub(crate) fn pack_trigram(first: u32, second: u32, third: u32) -> u128 {
-    (u128::from(first) << 64) | (u128::from(second) << 32) | u128::from(third)
-}
-
-pub(crate) fn unpack_trigram(key: u128) -> (u32, u32, u32) {
-    ((key >> 64) as u32, (key >> 32) as u32, key as u32)
+fn pack_ngram(tokens: &[u32]) -> [u32; 5] {
+    let mut key = [0; 5];
+    key[..tokens.len()].copy_from_slice(tokens);
+    key
 }
 
 #[cfg(test)]
@@ -479,11 +523,50 @@ mod tests {
 
     #[test]
     fn packed_ids_round_trip() {
-        assert_eq!(unpack_bigram(pack_bigram(1, u32::MAX)), (1, u32::MAX));
-        assert_eq!(
-            unpack_trigram(pack_trigram(4, 5, u32::MAX)),
-            (4, 5, u32::MAX)
-        );
+        assert_eq!(pack_ngram(&[1, u32::MAX]), [1, u32::MAX, 0, 0, 0]);
+        assert_eq!(pack_ngram(&[4, 5, 6, 7, u32::MAX]), [4, 5, 6, 7, u32::MAX]);
+    }
+
+    #[test]
+    fn discovers_and_exactly_recounts_orders_two_through_five() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "japanese-corpus-ngram-orders-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory)?;
+        let mut files = Vec::new();
+        for index in 0..2 {
+            let path = directory.join(format!("tokens-{index}.txt.zst"));
+            let mut encoder = zstd::stream::write::Encoder::new(File::create(&path)?, 1)?;
+            encoder.write_all(b"0 1 2 3 4\n0 1 2 3 4\n")?;
+            encoder.finish()?;
+            files.push(path);
+        }
+        let raw_to_vocab: Vec<u32> = (0..5).collect();
+        let (bigrams, trigrams) = discover_lower_candidates(&files, &raw_to_vocab, 2)?;
+        let lower = recount_lower_candidates(&files, &raw_to_vocab, bigrams, trigrams)?;
+        for (order, recounted) in lower.into_iter().enumerate() {
+            let order = order + 2;
+            assert_eq!(recounted.total, 2 * 2 * (6 - order) as u64);
+            assert_eq!(
+                recounted.counts.get(&pack_ngram(&[0, 1, 2, 3, 4][..order])),
+                Some(&4)
+            );
+        }
+        for order in 4..=5 {
+            let candidates = discover_order_candidates(&files, &raw_to_vocab, 2, order)?;
+            let recounted = recount_order_candidates(&files, &raw_to_vocab, candidates, order)?;
+            assert_eq!(recounted.total, 2 * 2 * (6 - order) as u64);
+            assert_eq!(
+                recounted.counts.get(&pack_ngram(&[0, 1, 2, 3, 4][..order])),
+                Some(&4)
+            );
+        }
+        fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     #[test]

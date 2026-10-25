@@ -229,7 +229,7 @@ jobs:
     needs: [prepare, wikipedia, aozora]
     if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 720
+    timeout-minutes: 360
     permissions:
       contents: write
     steps:
@@ -447,7 +447,7 @@ jobs:
               }
             '
           done < <(find "$OUTPUT" -maxdepth 1 -type f -name 'mozc-*.txt.zst' -print0 | sort -z)
-          jq -e '.orders | length == 3 and all(.retained_entries > 0)' \
+          jq -e '.orders | length == 5 and all(.retained_entries > 0) and ([.[].order] == [1,2,3,4,5])' \
             "$OUTPUT/ngram-manifest.json" >/dev/null
           (cd "$OUTPUT" && sha256sum --check NGRAM-SHA256SUMS)
 
@@ -460,8 +460,23 @@ jobs:
           done < <(find "$OUTPUT" -maxdepth 1 -type f -print0)
           mapfile -d '' ASSETS < <(find "$OUTPUT" -maxdepth 1 -type f -print0 | sort -z)
           gh release upload "$RELEASE_TAG" "${ASSETS[@]}"
+          mapfile -d '' ANALYSIS_INPUTS < <(
+            find "$OUTPUT/analysis-inputs" -maxdepth 1 -type f -name 'ngram-*.jsonl.zst' -print0 | sort -z
+          )
+          if (( ${#ANALYSIS_INPUTS[@]} == 0 )); then
+            echo "No GiNZA analysis inputs were generated." >&2
+            exit 1
+          fi
+          for ASSET in "${ANALYSIS_INPUTS[@]}"; do
+            SIZE=$(stat --format='%s' "$ASSET")
+            if (( SIZE >= 2147483648 )); then
+              echo "Analysis input exceeds 2 GiB: $ASSET" >&2
+              exit 1
+            fi
+          done
+          gh release upload "$RELEASE_TAG" "${ANALYSIS_INPUTS[@]}"
           gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/ngram-remote-assets.json"
-          for ASSET in "${ASSETS[@]}"; do
+          for ASSET in "${ASSETS[@]}" "${ANALYSIS_INPUTS[@]}"; do
             NAME=$(basename "$ASSET")
             LOCAL_SIZE=$(stat --format='%s' "$ASSET")
             REMOTE_SIZE=$(jq -r --arg name "$NAME" '.assets[] | select(.name == $name) | .size' \
@@ -479,6 +494,103 @@ jobs:
             ${{ runner.temp }}/ngram-output/ngram-manifest.json
             ${{ runner.temp }}/ngram-output/NGRAM-SHA256SUMS
             ${{ runner.temp }}/ngram-output/ajimee-bench-report.json
+          retention-days: 1
+  annotated-ngram:
+    needs: [prepare, dictionary]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.9"
+          enable-cache: true
+          cache-dependency-glob: ngram-builder/annotation/uv.lock
+      - name: Install pinned annotation environment
+        run: |
+          set -euo pipefail
+          command -v zstd || { sudo apt-get update && sudo apt-get install -y zstd; }
+          uv sync --project ngram-builder/annotation --locked --no-install-project
+      - name: Download dictionary manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: ngram-metadata
+          path: ${{ runner.temp }}/ngram
+      - name: Build, validate, and upload annotated n-grams
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          INPUTS="$RUNNER_TEMP/ngram-analysis-inputs"
+          OUTPUT="$RUNNER_TEMP/annotated-ngram-output"
+          mkdir -p "$INPUTS" "$OUTPUT"
+          gh release download "$RELEASE_TAG" \
+            --pattern 'ngram-[1-5]-*.jsonl.zst' \
+            --dir "$INPUTS"
+          if ! compgen -G "$INPUTS/ngram-*.jsonl.zst" >/dev/null; then
+            echo "No n-gram analysis inputs were downloaded from the draft release." >&2
+            exit 1
+          fi
+          find "$INPUTS" -maxdepth 1 -type f -name 'ngram-*.jsonl.zst' \
+            -print0 | sort -z | xargs -0 -r -n1 zstd --test
+          uv run --project ngram-builder/annotation --python 3.11 \
+            python ngram-builder/annotation/annotate.py \
+            --input-dir "$INPUTS" \
+            --output-dir "$OUTPUT" \
+            --ngram-manifest "$RUNNER_TEMP/ngram/ngram-manifest.json" \
+            --pipeline-commit "$GITHUB_SHA"
+          jq -e '.orders | length == 5 and all(.retained_entries > 0) and ([.[].order] == [1,2,3,4,5])' \
+            "$OUTPUT/ngram-annotated-manifest.json" >/dev/null
+          (cd "$OUTPUT" && sha256sum --check NGRAM-ANNOTATED-SHA256SUMS)
+          for ASSET in "$OUTPUT"/ngram-annotated-*.jsonl.zst; do
+            zstd --test "$ASSET"
+            zstd --decompress --stdout "$ASSET" | python -c '
+          import json, sys
+          for line in sys.stdin:
+              item = json.loads(line)
+              assert 1 <= item["order"] <= 5
+              assert len(item["source_tokens"]) == item["order"]
+              assert item["analysis_scope"] == "standalone_phrase"
+              assert item["bunsetsu"] and item["morphology"]
+          '
+          done
+          while IFS= read -r -d '' ASSET; do
+            SIZE=$(stat --format='%s' "$ASSET")
+            if (( SIZE >= 2147483648 )); then
+              echo "Release asset exceeds 2 GiB: $ASSET" >&2
+              exit 1
+            fi
+          done < <(find "$OUTPUT" -maxdepth 1 -type f -print0)
+          mapfile -d '' ASSETS < <(find "$OUTPUT" -maxdepth 1 -type f -print0 | sort -z)
+          gh release upload "$RELEASE_TAG" "${ASSETS[@]}"
+          gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/annotated-ngram-remote-assets.json"
+          for ASSET in "${ASSETS[@]}"; do
+            NAME=$(basename "$ASSET")
+            LOCAL_SIZE=$(stat --format='%s' "$ASSET")
+            REMOTE_SIZE=$(jq -r --arg name "$NAME" '.assets[] | select(.name == $name) | .size' \
+              "$RUNNER_TEMP/annotated-ngram-remote-assets.json")
+            if [[ "$REMOTE_SIZE" != "$LOCAL_SIZE" ]]; then
+              echo "Uploaded annotated n-gram asset size mismatch: $NAME local=$LOCAL_SIZE remote=$REMOTE_SIZE" >&2
+              exit 1
+            fi
+          done
+          while IFS= read -r -d '' ASSET; do
+            gh release delete-asset "$RELEASE_TAG" "$(basename "$ASSET")" --yes
+          done < <(find "$INPUTS" -maxdepth 1 -type f -name 'ngram-*.jsonl.zst' -print0 | sort -z)
+      - name: Save annotated n-gram metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: annotated-ngram-metadata
+          path: |
+            ${{ runner.temp }}/annotated-ngram-output/ngram-annotated-manifest.json
+            ${{ runner.temp }}/annotated-ngram-output/NGRAM-ANNOTATED-SHA256SUMS
           retention-days: 1
 
   english-dictionary:
@@ -609,7 +721,7 @@ jobs:
           retention-days: 1
 
   finalize:
-    needs: [prepare, wikipedia, aozora, homophones, dictionary, english-dictionary]
+    needs: [prepare, wikipedia, aozora, homophones, dictionary, annotated-ngram, english-dictionary]
     if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -619,6 +731,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.9"
+          enable-cache: true
+          cache-dependency-glob: ngram-builder/annotation/uv.lock
+      - name: Install published-release verification tools
+        run: |
+          set -euo pipefail
+          command -v zstd || { sudo apt-get update && sudo apt-get install -y zstd; }
+          uv sync --project ngram-builder/annotation --locked --no-install-project
       - name: Download build metadata
         uses: actions/download-artifact@v4
         with:
@@ -635,6 +757,11 @@ jobs:
         with:
           name: ngram-metadata
           path: ${{ runner.temp }}/ngram
+      - name: Download annotated n-gram metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: annotated-ngram-metadata
+          path: ${{ runner.temp }}/annotated-ngram
       - name: Download English dictionary metadata
         uses: actions/download-artifact@v4
         with:
@@ -669,6 +796,8 @@ jobs:
             --dictionary-checksums "$RUNNER_TEMP/ngram/NGRAM-SHA256SUMS" \
             --english-dictionary-manifest "$RUNNER_TEMP/english/english-dictionary-manifest.json" \
             --english-dictionary-checksums "$RUNNER_TEMP/english/ENGLISH-DICTIONARY-SHA256SUMS" \
+            --annotated-ngram-manifest "$RUNNER_TEMP/annotated-ngram/ngram-annotated-manifest.json" \
+            --annotated-ngram-checksums "$RUNNER_TEMP/annotated-ngram/NGRAM-ANNOTATED-SHA256SUMS" \
             --ajimee-report "$RUNNER_TEMP/ngram/ajimee-bench-report.json"
 
           RECORDS=$(jq -r '.totals.records' "$RUNNER_TEMP/manifest.json")
@@ -676,6 +805,9 @@ jobs:
           UNIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 1) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           BIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 2) | .retained_entries' "$RUNNER_TEMP/manifest.json")
           TRIGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 3) | .retained_entries' "$RUNNER_TEMP/manifest.json")
+          FOURGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 4) | .retained_entries' "$RUNNER_TEMP/manifest.json")
+          FIVEGRAMS=$(jq -r '.dictionaries.orders[] | select(.order == 5) | .retained_entries' "$RUNNER_TEMP/manifest.json")
+          ANNOTATED_ENTRIES=$(jq -r '.totals.annotated_ngram_entries' "$RUNNER_TEMP/manifest.json")
           ENGLISH_ENTRIES=$(jq -r '.english_dictionary.counts.retained_entries' "$RUNNER_TEMP/manifest.json")
           HOMOPHONE_GROUPS=$(jq -r '.corpus.homophone_groups' "$RUNNER_TEMP/homophone/homophone-manifest.json")
           HOMOPHONE_CANDIDATES=$(jq -r '.corpus.candidate_forms' "$RUNNER_TEMP/homophone/homophone-manifest.json")
@@ -694,6 +826,9 @@ jobs:
             echo "- Mozc unigram entries: $UNIGRAMS"
             echo "- Mozc bigram entries: $BIGRAMS"
             echo "- Mozc trigram entries: $TRIGRAMS"
+            echo "- Mozc 4-gram entries: $FOURGRAMS"
+            echo "- Mozc 5-gram entries: $FIVEGRAMS"
+            echo "- Bunsetsu-annotated n-gram entries: $ANNOTATED_ENTRIES"
             echo "- JMdict source date: $JMDICT_CREATED"
             echo "- Hiragana-to-English entries: $ENGLISH_ENTRIES"
             echo "- Natural homophone groups: $HOMOPHONE_GROUPS ($HOMOPHONE_CANDIDATES candidate forms, $HOMOPHONE_OCCURRENCES occurrences)"
@@ -711,6 +846,8 @@ jobs:
             schema/corpus-record.schema.json \
             schema/release-manifest.schema.json \
             schema/ngram-manifest.schema.json \
+            schema/ngram-annotated-record.schema.json \
+            schema/ngram-annotated-manifest.schema.json \
             schema/english-dictionary-manifest.schema.json \
             schema/ajimee-bench-report.schema.json
           gh release edit "$RELEASE_TAG" \
@@ -718,6 +855,14 @@ jobs:
             --latest \
             --title "JapaneseCorpus $RELEASE_TAG" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$RELEASE_TAG" \
+            > "$RUNNER_TEMP/published-release-assets.json"
+          PYTHONPATH=src uv run --project ngram-builder/annotation --python 3.11 \
+            python -m japanese_corpus verify-release \
+            --assets-json "$RUNNER_TEMP/published-release-assets.json" \
+            --tag "$RELEASE_TAG" \
+            --work-dir "$RUNNER_TEMP/published-release-verification"
 
           while IFS= read -r OLD_TAG; do
             if [[ -n "$OLD_TAG" && "$OLD_TAG" != "$RELEASE_TAG" ]]; then

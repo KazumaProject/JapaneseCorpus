@@ -46,6 +46,10 @@
         "metadata_assets"
       ]
     },
+    "annotated_ngrams": {
+      "type": "object",
+      "required": ["schema_version", "format", "analyzer", "parameters", "orders", "assets", "metadata_assets"]
+    },
     "english_dictionary": {
       "type": "object",
       "required": [

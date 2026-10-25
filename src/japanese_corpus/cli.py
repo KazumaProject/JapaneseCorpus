@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .aozora import build_aozora, selected_source_paths
@@ -95,12 +96,21 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--english-dictionary-manifest", type=Path)
     manifest.add_argument("--english-dictionary-checksums", type=Path)
     manifest.add_argument("--ajimee-report", type=Path)
+    manifest.add_argument("--annotated-ngram-manifest", type=Path)
+    manifest.add_argument("--annotated-ngram-checksums", type=Path)
 
     verify = subparsers.add_parser(
         "verify-assets", help="Verify uploaded Release asset names and sizes"
     )
     verify.add_argument("--stats-dir", type=Path, required=True)
     verify.add_argument("--assets-json", type=Path, required=True)
+
+    verify_release = subparsers.add_parser(
+        "verify-release", help="Download and validate every published Release asset"
+    )
+    verify_release.add_argument("--assets-json", type=Path, required=True)
+    verify_release.add_argument("--tag", required=True)
+    verify_release.add_argument("--work-dir", type=Path, required=True)
     return parser
 
 
@@ -166,8 +176,20 @@ def main(argv: list[str] | None = None) -> None:
             english_dictionary_manifest_path=args.english_dictionary_manifest,
             english_dictionary_checksums_path=args.english_dictionary_checksums,
             ajimee_report_path=args.ajimee_report,
+            annotated_ngram_manifest_path=args.annotated_ngram_manifest,
+            annotated_ngram_checksums_path=args.annotated_ngram_checksums,
         )
     elif args.command == "verify-assets":
         verify_remote_assets(args.stats_dir, args.assets_json)
+    elif args.command == "verify-release":
+        from .release_verify import verify_published_release
+
+        print(
+            json.dumps(
+                verify_published_release(args.assets_json, args.tag, args.work_dir),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
     else:
         raise AssertionError(f"Unhandled command {args.command}")

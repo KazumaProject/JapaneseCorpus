@@ -32,6 +32,8 @@ jobs:
           python -m json.tool schema/corpus-record.schema.json >/dev/null
           python -m json.tool schema/release-manifest.schema.json >/dev/null
           python -m json.tool schema/ngram-manifest.schema.json >/dev/null
+          python -m json.tool schema/ngram-annotated-manifest.schema.json >/dev/null
+          python -m json.tool schema/ngram-annotated-record.schema.json >/dev/null
           python -m json.tool schema/english-dictionary-manifest.schema.json >/dev/null
           python -m json.tool schema/ajimee-bench-report.schema.json >/dev/null
           PYTHONPATH=src python -m japanese_corpus --help >/dev/null
@@ -48,6 +50,11 @@ jobs:
         run: |
           cargo fmt --manifest-path jmdict-builder/Cargo.toml -- --check
           cargo test --locked --manifest-path jmdict-builder/Cargo.toml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.9"
+          enable-cache: true
+          cache-dependency-glob: ngram-builder/annotation/uv.lock
       - name: Run n-gram integration test
         run: |
           set -euo pipefail
@@ -92,8 +99,26 @@ jobs:
             zstd --test "$ASSET"
             zstd --decompress --stdout "$ASSET" | awk -F '\t' 'NF != 5 { exit 1 }'
           done
-          jq -e '.orders | length == 3 and all(.retained_entries > 0)' \
+          jq -e '.orders | length == 5 and all(.retained_entries > 0)' \
             "$INTEGRATION/output/ngram-manifest.json" >/dev/null
+          zstd --test "$INTEGRATION"/output/analysis-inputs/*.jsonl.zst
+          uv lock --project ngram-builder/annotation --check
+          uv sync --project ngram-builder/annotation --locked --no-install-project
+          PYTHONPATH=src:ngram-builder/annotation uv run \
+            --project ngram-builder/annotation --python 3.11 \
+            python -m unittest test_annotate -v
+          uv run --project ngram-builder/annotation --python 3.11 \
+            python ngram-builder/annotation/annotate.py \
+            --input-dir "$INTEGRATION/output/analysis-inputs" \
+            --output-dir "$INTEGRATION/output" \
+            --ngram-manifest "$INTEGRATION/output/ngram-manifest.json" \
+            --pipeline-commit "$GITHUB_SHA"
+          (cd "$INTEGRATION/output" && sha256sum --check NGRAM-ANNOTATED-SHA256SUMS)
+          jq -e '.orders | length == 5 and all(.retained_entries > 0)' \
+            "$INTEGRATION/output/ngram-annotated-manifest.json" >/dev/null
+          for ASSET in "$INTEGRATION"/output/ngram-annotated-*.jsonl.zst; do
+            zstd --test "$ASSET"
+          done
           CONVERTED=$(cargo run --quiet --locked \
             --manifest-path conversion-engine/Cargo.toml --bin kana-kanji-converter -- \
             --dictionary "$INTEGRATION/output" \
