@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use japanese_corpus_ngram::{build, build_homophones, BuildOptions, HomophoneBuildOptions};
 
 #[derive(Debug, Parser)]
-#[command(about = "Build Mozc-format 1/2/3-gram dictionaries from JapaneseCorpus")]
+#[command(about = "Build Mozc-format 1- through 5-gram dictionaries from JapaneseCorpus")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

@@ -42,6 +42,8 @@ def build_manifest(
     english_dictionary_manifest_path: Path | None = None,
     english_dictionary_checksums_path: Path | None = None,
     ajimee_report_path: Path | None = None,
+    annotated_ngram_manifest_path: Path | None = None,
+    annotated_ngram_checksums_path: Path | None = None,
 ) -> dict[str, Any]:
     stats = load_stats(stats_directory)
     with discovery_path.open(encoding="utf-8") as stream:
@@ -115,6 +117,17 @@ def build_manifest(
             "ajimee-bench-report.json",
         )
 
+    annotated_ngrams = None
+    annotated_ngram_checksum_entries: list[tuple[str, str]] = []
+    if annotated_ngram_manifest_path is not None or annotated_ngram_checksums_path is not None:
+        if annotated_ngram_manifest_path is None or annotated_ngram_checksums_path is None:
+            raise RuntimeError(
+                "Annotated n-gram manifest and checksum paths must be provided together"
+            )
+        annotated_ngrams, annotated_ngram_checksum_entries = load_annotated_ngram_metadata(
+            annotated_ngram_manifest_path, annotated_ngram_checksums_path
+        )
+
     manifest = {
         "schema_version": 1,
         "release": {
@@ -186,8 +199,27 @@ def build_manifest(
                 if english_dictionary is not None
                 else {}
             ),
+            **(
+                {
+                    "annotated_ngram_assets": len(annotated_ngrams["assets"]),
+                    "annotated_ngram_entries": sum(
+                        int(order["retained_entries"])
+                        for order in annotated_ngrams["orders"]
+                    ),
+                    "annotated_ngram_bytes": sum(
+                        int(asset["bytes"]) for asset in annotated_ngrams["assets"]
+                    ),
+                }
+                if annotated_ngrams is not None
+                else {}
+            ),
         },
         **({"dictionaries": dictionaries} if dictionaries is not None else {}),
+        **(
+            {"annotated_ngrams": annotated_ngrams}
+            if annotated_ngrams is not None
+            else {}
+        ),
         **(
             {"english_dictionary": english_dictionary}
             if english_dictionary is not None
@@ -206,6 +238,8 @@ def build_manifest(
         for digest, name in dictionary_checksum_entries:
             stream.write(f"{digest}  {name}\n")
         for digest, name in english_checksum_entries:
+            stream.write(f"{digest}  {name}\n")
+        for digest, name in annotated_ngram_checksum_entries:
             stream.write(f"{digest}  {name}\n")
         if ajimee_checksum_entry is not None:
             digest, name = ajimee_checksum_entry
@@ -357,6 +391,54 @@ def load_english_dictionary_metadata(
     )
     dictionary["metadata_assets"] = [manifest_name, checksums_name]
     return dictionary, entries
+
+
+def load_annotated_ngram_metadata(
+    manifest_path: Path, checksums_path: Path
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    manifest_name = "ngram-annotated-manifest.json"
+    checksums_name = "NGRAM-ANNOTATED-SHA256SUMS"
+    with manifest_path.open(encoding="utf-8") as stream:
+        annotated = json.load(stream)
+    required = {"schema_version", "format", "analyzer", "parameters", "orders", "assets"}
+    missing = required - annotated.keys()
+    if missing:
+        raise RuntimeError(f"Annotated n-gram manifest is missing fields: {sorted(missing)}")
+    if annotated["schema_version"] != 1 or annotated["format"].get("analysis_scope") != "standalone_phrase":
+        raise RuntimeError("Unsupported annotated n-gram manifest format")
+    if [int(order["order"]) for order in annotated["orders"]] != [1, 2, 3, 4, 5]:
+        raise RuntimeError("Annotated n-gram manifest must describe orders 1 through 5")
+
+    sums: dict[str, str] = {}
+    with checksums_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            try:
+                digest, name = line.rstrip("\n").split("  ", 1)
+            except ValueError as error:
+                raise RuntimeError(f"Malformed annotated n-gram checksum line {line_number}") from error
+            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+                raise RuntimeError(f"Invalid SHA-256 on annotated n-gram checksum line {line_number}")
+            sums[name] = digest
+
+    entries: list[tuple[str, str]] = []
+    for asset in annotated["assets"]:
+        required_asset = {"name", "entries", "bytes", "sha256"}
+        if required_asset - asset.keys():
+            raise RuntimeError("Annotated n-gram asset is missing required fields")
+        if int(asset["bytes"]) >= MAX_RELEASE_ASSET_BYTES:
+            raise RuntimeError(f"{asset['name']} exceeds GitHub's 2 GiB asset limit")
+        if sums.get(asset["name"]) != asset["sha256"]:
+            raise RuntimeError(f"Checksum mismatch for annotated n-gram asset {asset['name']}")
+        entries.append((asset["sha256"], asset["name"]))
+
+    manifest_digest = _sha256(manifest_path)
+    if sums.get(manifest_name) != manifest_digest:
+        raise RuntimeError("Annotated n-gram manifest checksum mismatch")
+    entries.extend(
+        [(manifest_digest, manifest_name), (_sha256(checksums_path), checksums_name)]
+    )
+    annotated["metadata_assets"] = [manifest_name, checksums_name]
+    return annotated, entries
 
 
 def load_ajimee_report(report_path: Path) -> dict[str, Any]:

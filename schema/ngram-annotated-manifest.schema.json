@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KazumaProject/JapaneseCorpus/blob/main/schema/ngram-annotated-manifest.schema.json",
+  "title": "JapaneseCorpus annotated n-gram manifest",
+  "type": "object",
+  "required": ["schema_version", "format", "analyzer", "parameters", "orders", "assets"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "format": {
+      "type": "object",
+      "required": ["name", "encoding", "compression", "offset_unit", "analysis_scope"]
+    },
+    "analyzer": {
+      "type": "object",
+      "required": ["implementation", "version", "model", "model_version", "model_artifact_sha256", "spacy_version"]
+    },
+    "parameters": {
+      "type": "object",
+      "required": ["unigram_min_count", "ngram_min_count", "maximum_phrase_field_bytes", "pipeline_commit", "ngram_manifest_sha256"]
+    },
+    "orders": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["order", "assets", "retained_entries"],
+        "properties": {
+          "order": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "assets": { "type": "integer", "minimum": 1 },
+          "retained_entries": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["name", "entries", "bytes", "sha256"],
+        "properties": {
+          "name": { "type": "string" },
+          "entries": { "type": "integer", "minimum": 1 },
+          "bytes": { "type": "integer", "minimum": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

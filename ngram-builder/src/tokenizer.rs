@@ -9,8 +9,8 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use vibrato::Tokenizer;
 
-// Three retained tokens must remain below Mozc's 1024-byte conversion-key
-// limit even after their readings are concatenated into a trigram phrase.
+// Keep individual fields small; the complete phrase is checked against Mozc's
+// 1024-byte conversion-key limit when an n-gram of any order is written.
 const MAX_TOKEN_FIELD_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]

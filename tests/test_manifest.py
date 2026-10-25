@@ -133,6 +133,8 @@ class ManifestTest(unittest.TestCase):
                         {"order": 1, "retained_entries": 7},
                         {"order": 2, "retained_entries": 5},
                         {"order": 3, "retained_entries": 3},
+                        {"order": 4, "retained_entries": 2},
+                        {"order": 5, "retained_entries": 1},
                     ],
                     "assets": [
                         {
@@ -240,6 +242,41 @@ class ManifestTest(unittest.TestCase):
                 },
             )
 
+            annotated_asset = b'{"order":1,"analysis_scope":"standalone_phrase"}\n'
+            annotated_digest = hashlib.sha256(annotated_asset).hexdigest()
+            (directory / "ngram-annotated-1-00000.jsonl.zst").write_bytes(annotated_asset)
+            annotated_manifest_path = directory / "ngram-annotated-manifest.json"
+            write_json(
+                annotated_manifest_path,
+                {
+                    "schema_version": 1,
+                    "format": {"analysis_scope": "standalone_phrase"},
+                    "analyzer": {},
+                    "parameters": {},
+                    "orders": [
+                        {"order": order, "retained_entries": 1}
+                        for order in range(1, 6)
+                    ],
+                    "assets": [
+                        {
+                            "name": "ngram-annotated-1-00000.jsonl.zst",
+                            "entries": 1,
+                            "bytes": len(annotated_asset),
+                            "sha256": annotated_digest,
+                        }
+                    ],
+                },
+            )
+            annotated_manifest_digest = hashlib.sha256(
+                annotated_manifest_path.read_bytes()
+            ).hexdigest()
+            annotated_checksums_path = directory / "NGRAM-ANNOTATED-SHA256SUMS"
+            annotated_checksums_path.write_text(
+                f"{annotated_digest}  ngram-annotated-1-00000.jsonl.zst\n"
+                f"{annotated_manifest_digest}  ngram-annotated-manifest.json\n",
+                encoding="utf-8",
+            )
+
             manifest = build_manifest(
                 stats_directory,
                 discovery,
@@ -253,9 +290,12 @@ class ManifestTest(unittest.TestCase):
                 english_manifest_path,
                 english_sums_path,
                 ajimee_report_path,
+                annotated_ngram_manifest_path=annotated_manifest_path,
+                annotated_ngram_checksums_path=annotated_checksums_path,
             )
 
-            self.assertEqual(manifest["totals"]["dictionary_entries"], 15)
+            self.assertEqual(manifest["totals"]["dictionary_entries"], 18)
+            self.assertEqual(manifest["totals"]["annotated_ngram_entries"], 5)
             self.assertEqual(
                 manifest["dictionaries"]["metadata_assets"],
                 ["ngram-manifest.json", "NGRAM-SHA256SUMS"],
@@ -263,6 +303,7 @@ class ManifestTest(unittest.TestCase):
             checksums = (directory / "SHA256SUMS").read_text(encoding="utf-8")
             self.assertIn("mozc-unigram-00000.txt.zst", checksums)
             self.assertIn("NGRAM-SHA256SUMS", checksums)
+            self.assertIn("NGRAM-ANNOTATED-SHA256SUMS", checksums)
             self.assertEqual(manifest["totals"]["english_dictionary_entries"], 9)
             self.assertEqual(
                 manifest["english_dictionary"]["metadata_assets"],

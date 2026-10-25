@@ -52,8 +52,8 @@
     },
     "orders": {
       "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
+      "minItems": 5,
+      "maxItems": 5,
       "items": {
         "type": "object",
         "required": ["order", "total_observations", "retained_entries"]
@@ -61,7 +61,7 @@
     },
     "assets": {
       "type": "array",
-      "minItems": 6,
+      "minItems": 10,
       "items": {
         "type": "object",
         "required": ["name", "bytes", "sha256"]

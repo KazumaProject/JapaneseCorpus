@@ -8,15 +8,16 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::tokenizer::TokenKey;
-use crate::{unpack_bigram, unpack_trigram};
 
 pub struct OrderCounts {
     pub unigram: Vec<u64>,
-    pub bigram: FxHashMap<u64, u64>,
-    pub trigram: FxHashMap<u128, u64>,
     pub unigram_total: u64,
-    pub bigram_total: u64,
-    pub trigram_total: u64,
+}
+
+pub struct NgramOrderCounts {
+    pub order: u8,
+    pub counts: FxHashMap<[u32; 5], u64>,
+    pub total: u64,
 }
 
 pub struct BuildManifestInput {
@@ -89,6 +90,8 @@ struct Parameters {
     exact_count_guarantee: String,
     cost_scale: f64,
     entries_per_shard: usize,
+    maximum_phrase_field_bytes: usize,
+    skipped_overlong_entries: u64,
 }
 
 #[derive(Serialize)]
@@ -113,87 +116,67 @@ pub fn write_release_files(
     third_party: ThirdPartyFiles<'_>,
     vocabulary: &[TokenKey],
     counts: OrderCounts,
+    higher_orders: impl IntoIterator<Item = Result<NgramOrderCounts>>,
     input: BuildManifestInput,
 ) -> Result<usize> {
     let mut assets = Vec::new();
 
     let mut unigram_writer = ShardedWriter::new(output_dir, 1, input.entries_per_shard)?;
+    let mut unigram_analysis = AnalysisInputWriter::new(&output_dir.join("analysis-inputs"), 1)?;
     for (id, token) in vocabulary.iter().enumerate() {
         let count = counts.unigram[id];
         if count < input.unigram_min_count {
             continue;
         }
+        let cost = mozc_cost(count, counts.unigram_total, input.cost_scale);
         unigram_writer.write(&MozcRow {
             reading: &token.reading,
             left_id: token.left_id,
             right_id: token.right_id,
-            cost: mozc_cost(count, counts.unigram_total, input.cost_scale),
+            cost,
             surface: &token.surface,
+        })?;
+        unigram_analysis.write(&AnalysisInputRecord {
+            order: 1,
+            count,
+            total_observations: counts.unigram_total,
+            reading: &token.reading,
+            surface: &token.surface,
+            left_id: token.left_id,
+            right_id: token.right_id,
+            cost,
+            source_tokens: vec![token.clone()],
         })?;
     }
     let unigram_entries = unigram_writer.total_entries;
     assets.extend(unigram_writer.finish()?);
+    unigram_analysis.finish()?;
 
-    let mut bigram_keys: Vec<u64> = counts
-        .bigram
-        .iter()
-        .filter_map(|(key, count)| (*count >= input.ngram_min_count).then_some(*key))
-        .collect();
-    bigram_keys.sort_unstable();
-    let mut bigram_writer = ShardedWriter::new(output_dir, 2, input.entries_per_shard)?;
-    let mut reading = String::new();
-    let mut surface = String::new();
-    for key in bigram_keys {
-        let (first, second) = unpack_bigram(key);
-        let first = &vocabulary[first as usize];
-        let second = &vocabulary[second as usize];
-        reading.clear();
-        reading.push_str(&first.reading);
-        reading.push_str(&second.reading);
-        surface.clear();
-        surface.push_str(&first.surface);
-        surface.push_str(&second.surface);
-        bigram_writer.write(&MozcRow {
-            reading: &reading,
-            left_id: first.left_id,
-            right_id: second.right_id,
-            cost: mozc_cost(counts.bigram[&key], counts.bigram_total, input.cost_scale),
-            surface: &surface,
-        })?;
+    let mut orders = vec![OrderMetadata {
+        order: 1,
+        total_observations: counts.unigram_total,
+        retained_entries: unigram_entries,
+    }];
+    let mut skipped_overlong_entries = 0u64;
+    let mut expected_order = 2;
+    for higher_order in higher_orders {
+        let higher_order = higher_order?;
+        if higher_order.order != expected_order || !(2..=5).contains(&higher_order.order) {
+            anyhow::bail!(
+                "expected n-gram order {expected_order}, found {}",
+                higher_order.order
+            );
+        }
+        let (order_metadata, order_assets, skipped) =
+            write_ngram_order(output_dir, vocabulary, higher_order, &input)?;
+        orders.push(order_metadata);
+        assets.extend(order_assets);
+        skipped_overlong_entries += skipped;
+        expected_order += 1;
     }
-    let bigram_entries = bigram_writer.total_entries;
-    assets.extend(bigram_writer.finish()?);
-
-    let mut trigram_keys: Vec<u128> = counts
-        .trigram
-        .iter()
-        .filter_map(|(key, count)| (*count >= input.ngram_min_count).then_some(*key))
-        .collect();
-    trigram_keys.sort_unstable();
-    let mut trigram_writer = ShardedWriter::new(output_dir, 3, input.entries_per_shard)?;
-    for key in trigram_keys {
-        let (first, second, third) = unpack_trigram(key);
-        let first = &vocabulary[first as usize];
-        let second = &vocabulary[second as usize];
-        let third = &vocabulary[third as usize];
-        reading.clear();
-        reading.push_str(&first.reading);
-        reading.push_str(&second.reading);
-        reading.push_str(&third.reading);
-        surface.clear();
-        surface.push_str(&first.surface);
-        surface.push_str(&second.surface);
-        surface.push_str(&third.surface);
-        trigram_writer.write(&MozcRow {
-            reading: &reading,
-            left_id: first.left_id,
-            right_id: third.right_id,
-            cost: mozc_cost(counts.trigram[&key], counts.trigram_total, input.cost_scale),
-            surface: &surface,
-        })?;
+    if expected_order != 6 {
+        anyhow::bail!("expected n-gram orders 2 through 5");
     }
-    let trigram_entries = trigram_writer.total_entries;
-    assets.extend(trigram_writer.finish()?);
 
     let id_def_output = output_dir.join("mozc-id.def");
     fs::copy(third_party.mozc_id_def, &id_def_output)?;
@@ -252,6 +235,8 @@ pub fn write_release_files(
             ),
             cost_scale: input.cost_scale,
             entries_per_shard: input.entries_per_shard,
+            maximum_phrase_field_bytes: 1023,
+            skipped_overlong_entries,
         },
         corpus: CorpusMetadata {
             input_assets: &input.input_assets,
@@ -261,23 +246,7 @@ pub fn write_release_files(
             raw_unique_tokens: input.raw_unique_tokens,
             pipeline_commit: &input.pipeline_commit,
         },
-        orders: vec![
-            OrderMetadata {
-                order: 1,
-                total_observations: counts.unigram_total,
-                retained_entries: unigram_entries,
-            },
-            OrderMetadata {
-                order: 2,
-                total_observations: counts.bigram_total,
-                retained_entries: bigram_entries,
-            },
-            OrderMetadata {
-                order: 3,
-                total_observations: counts.trigram_total,
-                retained_entries: trigram_entries,
-            },
-        ],
+        orders,
         assets: &assets,
     };
     let manifest_path = output_dir.join("ngram-manifest.json");
@@ -294,6 +263,152 @@ pub fn write_release_files(
         writeln!(sums, "{}  {}", asset.sha256, asset.name)?;
     }
     Ok(checksum_assets.len() + 1)
+}
+
+fn write_ngram_order(
+    output_dir: &Path,
+    vocabulary: &[TokenKey],
+    order: NgramOrderCounts,
+    input: &BuildManifestInput,
+) -> Result<(OrderMetadata, Vec<Asset>, u64)> {
+    let NgramOrderCounts {
+        order,
+        mut counts,
+        total,
+    } = order;
+    let mut keys: Vec<[u32; 5]> = counts
+        .iter()
+        .filter_map(|(key, count)| (*count >= input.ngram_min_count).then_some(*key))
+        .collect();
+    keys.sort_unstable();
+
+    let mut dictionary_writer = ShardedWriter::new(output_dir, order, input.entries_per_shard)?;
+    let mut analysis_writer = AnalysisInputWriter::new(&output_dir.join("analysis-inputs"), order)?;
+    let mut reading = String::new();
+    let mut surface = String::new();
+    let mut skipped_overlong = 0u64;
+    for key in keys {
+        let count = counts.remove(&key).expect("retained key exists");
+        let source_tokens: Vec<&TokenKey> = key[..order as usize]
+            .iter()
+            .map(|id| &vocabulary[*id as usize])
+            .collect();
+        reading.clear();
+        surface.clear();
+        for token in &source_tokens {
+            reading.push_str(&token.reading);
+            surface.push_str(&token.surface);
+        }
+        if reading.len() > 1023 || surface.len() > 1023 {
+            skipped_overlong += 1;
+            continue;
+        }
+        let first = source_tokens
+            .first()
+            .expect("n-gram has at least two tokens");
+        let last = source_tokens
+            .last()
+            .expect("n-gram has at least two tokens");
+        let cost = mozc_cost(count, total, input.cost_scale);
+        dictionary_writer.write(&MozcRow {
+            reading: &reading,
+            left_id: first.left_id,
+            right_id: last.right_id,
+            cost,
+            surface: &surface,
+        })?;
+        analysis_writer.write(&AnalysisInputRecord {
+            order,
+            count,
+            total_observations: total,
+            reading: &reading,
+            surface: &surface,
+            left_id: first.left_id,
+            right_id: last.right_id,
+            cost,
+            source_tokens: source_tokens.into_iter().cloned().collect(),
+        })?;
+    }
+    let retained_entries = dictionary_writer.total_entries;
+    let assets = dictionary_writer.finish()?;
+    analysis_writer.finish()?;
+    Ok((
+        OrderMetadata {
+            order,
+            total_observations: total,
+            retained_entries,
+        },
+        assets,
+        skipped_overlong,
+    ))
+}
+
+#[derive(Serialize)]
+struct AnalysisInputRecord<'a> {
+    order: u8,
+    count: u64,
+    total_observations: u64,
+    reading: &'a str,
+    surface: &'a str,
+    left_id: u16,
+    right_id: u16,
+    cost: i32,
+    source_tokens: Vec<TokenKey>,
+}
+
+struct AnalysisInputWriter {
+    directory: PathBuf,
+    order: u8,
+    part: usize,
+    entries: usize,
+    encoder: Option<zstd::stream::write::Encoder<'static, File>>,
+}
+
+impl AnalysisInputWriter {
+    const ENTRIES_PER_PART: usize = 100_000;
+
+    fn new(directory: &Path, order: u8) -> Result<Self> {
+        fs::create_dir_all(directory)?;
+        Ok(Self {
+            directory: directory.to_owned(),
+            order,
+            part: 0,
+            entries: 0,
+            encoder: None,
+        })
+    }
+
+    fn write(&mut self, record: &AnalysisInputRecord<'_>) -> Result<()> {
+        if self.entries == Self::ENTRIES_PER_PART {
+            self.finish_part()?;
+        }
+        if self.encoder.is_none() {
+            let path = self
+                .directory
+                .join(format!("ngram-{}-{:05}.jsonl.zst", self.order, self.part));
+            let mut encoder = zstd::stream::write::Encoder::new(File::create(path)?, 9)?;
+            encoder.multithread(0)?;
+            self.encoder = Some(encoder);
+        }
+        let encoder = self.encoder.as_mut().expect("analysis shard was opened");
+        serde_json::to_writer(&mut *encoder, record)?;
+        encoder.write_all(b"\n")?;
+        self.entries += 1;
+        Ok(())
+    }
+
+    fn finish_part(&mut self) -> Result<()> {
+        if let Some(encoder) = self.encoder.take() {
+            encoder.finish()?;
+            self.part += 1;
+            self.entries = 0;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.finish_part()
+    }
 }
 
 fn mozc_cost(count: u64, total: u64, scale: f64) -> i32 {
@@ -395,6 +510,8 @@ fn order_name(order: u8) -> &'static str {
         1 => "unigram",
         2 => "bigram",
         3 => "trigram",
+        4 => "4gram",
+        5 => "5gram",
         _ => "ngram",
     }
 }
@@ -431,13 +548,13 @@ dictionary source format:\n\n\
 ```text\n\
 reading<TAB>left_id<TAB>right_id<TAB>cost<TAB>surface\n\
 ```\n\n\
-Bigram and trigram rows are phrase entries: the adjacent token readings and\n\
+N-gram rows are phrase entries: the adjacent token readings and\n\
 surfaces are concatenated, the first token supplies `left_id`, and the last\n\
 token supplies `right_id`. Context IDs correspond to the included\n\
 `mozc-id.def`. Costs are `-ln(count / observations) * {cost_scale}` rounded and\n\
 clamped to Mozc's positive 16-bit range.\n\n\
 The complete corpus is scanned. Unigrams require count >= {unigram_min};\n\
-bigrams and trigrams require count >= {ngram_min}. Candidate n-grams are\n\
+orders 2 through 5 require count >= {ngram_min}. Candidate n-grams are\n\
 recounted exactly over every input asset before filtering. See\n\
 `ngram-manifest.json` for source versions, totals, parameters, and checksums.\n\n\
 These files are system dictionary *source* files, not Mozc user-dictionary\n\
