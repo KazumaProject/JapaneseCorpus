@@ -137,14 +137,30 @@ def validate_annotated_record(record: dict[str, Any], label: str) -> None:
     for field in ("morphology", "bunsetsu"):
         cursor = 0
         segments = record[field]
+        morphology = field == "morphology"
         for index, segment in enumerate(segments, start=1):
             start, end = segment["start"], segment["end"]
-            if start != cursor or end <= start or end > len(surface):
+            gap = surface[cursor:start] if start >= cursor else ""
+            invalid_start = (
+                start < cursor or (gap and not gap.isspace())
+                if morphology
+                else start != cursor
+            )
+            if (
+                invalid_start or end <= start or end > len(surface)
+            ):
                 raise RuntimeError(f"{label} {field} offsets are invalid at item {index}")
             if surface[start:end] != segment["surface"]:
                 raise RuntimeError(f"{label} {field} surface does not match its offsets")
             cursor = end
-        if not segments or cursor != len(surface):
+        if not segments:
+            raise RuntimeError(f"{label} {field} offsets do not cover the phrase")
+        if morphology:
+            trailing_text = surface[cursor:]
+            uncovered_text_is_invalid = bool(trailing_text) and not trailing_text.isspace()
+        else:
+            uncovered_text_is_invalid = cursor != len(surface)
+        if uncovered_text_is_invalid:
             raise RuntimeError(f"{label} {field} offsets do not cover the phrase")
 
 
