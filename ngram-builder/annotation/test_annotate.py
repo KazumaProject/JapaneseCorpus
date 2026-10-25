@@ -135,6 +135,76 @@ class MinimumCountForOrderTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "bunsetsu offsets"):
             validate_annotated_record(record, "fixture")
 
+    def test_post_download_check_allows_trailing_whitespace_outside_morphology(self) -> None:
+        surface = "ルーマニア　"
+        record = {
+            "order": 1,
+            "count": 46,
+            "total_observations": 100,
+            "reading": "るーまにあ",
+            "surface": surface,
+            "left_id": 1,
+            "right_id": 1,
+            "cost": 100,
+            "source_tokens": [
+                {"surface": surface, "reading": "るーまにあ", "left_id": 1, "right_id": 1}
+            ],
+            "analysis_scope": "standalone_phrase",
+            "morphology": [
+                {
+                    "surface": "ルーマニア",
+                    "lemma": "ルーマニア",
+                    "pos": "PROPN",
+                    "tag": "名詞-固有名詞-地名-国",
+                    "reading": "ルーマニア",
+                    "start": 0,
+                    "end": 5,
+                }
+            ],
+            "bunsetsu": [{"surface": surface, "start": 0, "end": 6}],
+        }
+
+        validate_annotated_record(record, "fixture")
+
+    def test_post_download_check_allows_whitespace_between_morphology_tokens(self) -> None:
+        record = {
+            "order": 1,
+            "count": 16,
+            "total_observations": 100,
+            "reading": "ねこねこ",
+            "surface": "猫 猫",
+            "left_id": 1,
+            "right_id": 1,
+            "cost": 100,
+            "source_tokens": [
+                {"surface": "猫 猫", "reading": "ねこねこ", "left_id": 1, "right_id": 1}
+            ],
+            "analysis_scope": "standalone_phrase",
+            "morphology": [
+                {
+                    "surface": "猫",
+                    "lemma": "猫",
+                    "pos": "NOUN",
+                    "tag": "名詞-普通名詞-一般",
+                    "reading": "ネコ",
+                    "start": 0,
+                    "end": 1,
+                },
+                {
+                    "surface": "猫",
+                    "lemma": "猫",
+                    "pos": "NOUN",
+                    "tag": "名詞-普通名詞-一般",
+                    "reading": "ネコ",
+                    "start": 2,
+                    "end": 3,
+                },
+            ],
+            "bunsetsu": [{"surface": "猫 猫", "start": 0, "end": 3}],
+        }
+
+        validate_annotated_record(record, "fixture")
+
 
 if __name__ == "__main__":
     unittest.main()
